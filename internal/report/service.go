@@ -55,6 +55,8 @@ func (s *Service) Generate(_ context.Context, req GenerateRequest) (StructuredIn
 			Summary:         eval.Summary,
 		})
 	}
+	dimensionComparisons := buildDimensionComparisons(scores)
+	radarChart := buildRadarChartData(scores, dimensionComparisons)
 
 	averageScore := total / float64(len(req.Evaluations))
 	recommendation := recommendHire(averageScore)
@@ -63,6 +65,8 @@ func (s *Service) Generate(_ context.Context, req GenerateRequest) (StructuredIn
 		ReportID:             reportID,
 		Candidate:            req.Candidate,
 		Scores:               scores,
+		DimensionComparisons: dimensionComparisons,
+		RadarChart:           radarChart,
 		FinalComment:         buildFinalComment(req.Evaluations),
 		HiringRecommendation: recommendation,
 		AverageScore:         round(averageScore, 2),
@@ -225,6 +229,34 @@ func buildMarkdown(report StructuredInterviewReport) string {
 	b.WriteString(fmt.Sprintf("- Average Score: %.2f\n", report.AverageScore))
 	b.WriteString(fmt.Sprintf("- Hiring Recommendation: **%s**\n\n", report.HiringRecommendation))
 
+	b.WriteString("## Dimension Comparison\n\n")
+	b.WriteString("| Dimension | Average | Highest | Lowest | Interviewer Scores |\n")
+	b.WriteString("|---|---:|---:|---:|---|\n")
+	for _, cmp := range report.DimensionComparisons {
+		parts := make([]string, 0, len(cmp.Scores))
+		for _, item := range cmp.Scores {
+			parts = append(parts, fmt.Sprintf("%s(%s): %.2f", item.InterviewerName, item.InterviewID, item.Score))
+		}
+		b.WriteString(fmt.Sprintf("| %s | %.2f | %.2f | %.2f | %s |\n",
+			cmp.Dimension,
+			cmp.AverageScore,
+			cmp.HighestScore,
+			cmp.LowestScore,
+			escapePipe(strings.Join(parts, "; ")),
+		))
+	}
+
+	b.WriteString("\n## Radar Chart Data\n\n")
+	b.WriteString("| Interview | Interviewer | Values |\n")
+	b.WriteString("|---|---|---|\n")
+	for _, series := range report.RadarChart.Series {
+		b.WriteString(fmt.Sprintf("| %s | %s | %s |\n",
+			series.InterviewID,
+			series.InterviewerName,
+			escapePipe(formatRadarValues(series.Values)),
+		))
+	}
+
 	b.WriteString("## Interview Scores\n\n")
 	b.WriteString("| Interview | Interviewer | Overall | Dimension | Score | Comment |\n")
 	b.WriteString("|---|---|---:|---|---:|---|\n")
@@ -249,6 +281,106 @@ func buildMarkdown(report StructuredInterviewReport) string {
 
 func escapePipe(in string) string {
 	return strings.ReplaceAll(in, "|", "\\|")
+}
+
+func buildDimensionComparisons(scores []InterviewerScore) []DimensionComparison {
+	buckets := make(map[string][]DimensionScorePoint)
+	for _, interviewerScore := range scores {
+		for _, dim := range interviewerScore.Dimensions {
+			buckets[dim.Name] = append(buckets[dim.Name], DimensionScorePoint{
+				InterviewID:     interviewerScore.InterviewID,
+				InterviewerID:   interviewerScore.InterviewerID,
+				InterviewerName: interviewerScore.InterviewerName,
+				Score:           dim.Score,
+			})
+		}
+	}
+
+	names := make([]string, 0, len(buckets))
+	for name := range buckets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	comparisons := make([]DimensionComparison, 0, len(names))
+	for _, name := range names {
+		points := buckets[name]
+		sort.Slice(points, func(i, j int) bool {
+			if points[i].InterviewID != points[j].InterviewID {
+				return points[i].InterviewID < points[j].InterviewID
+			}
+			if points[i].InterviewerID != points[j].InterviewerID {
+				return points[i].InterviewerID < points[j].InterviewerID
+			}
+			return points[i].InterviewerName < points[j].InterviewerName
+		})
+
+		total := 0.0
+		highest := points[0].Score
+		lowest := points[0].Score
+		for _, point := range points {
+			total += point.Score
+			if point.Score > highest {
+				highest = point.Score
+			}
+			if point.Score < lowest {
+				lowest = point.Score
+			}
+		}
+
+		comparisons = append(comparisons, DimensionComparison{
+			Dimension:    name,
+			AverageScore: round(total/float64(len(points)), 2),
+			HighestScore: round(highest, 2),
+			LowestScore:  round(lowest, 2),
+			Scores:       points,
+		})
+	}
+
+	return comparisons
+}
+
+func buildRadarChartData(scores []InterviewerScore, comparisons []DimensionComparison) RadarChartData {
+	dimensions := make([]RadarDimension, 0, len(comparisons))
+	for _, comparison := range comparisons {
+		dimensions = append(dimensions, RadarDimension{
+			Name:     comparison.Dimension,
+			MaxScore: 5,
+		})
+	}
+
+	series := make([]RadarSeries, 0, len(scores))
+	for _, interviewerScore := range scores {
+		values := make([]RadarDimensionValue, 0, len(interviewerScore.Dimensions))
+		for _, dim := range interviewerScore.Dimensions {
+			values = append(values, RadarDimensionValue{
+				Dimension: dim.Name,
+				Score:     round(dim.Score, 2),
+			})
+		}
+		series = append(series, RadarSeries{
+			InterviewID:     interviewerScore.InterviewID,
+			InterviewerID:   interviewerScore.InterviewerID,
+			InterviewerName: interviewerScore.InterviewerName,
+			Values:          values,
+		})
+	}
+
+	return RadarChartData{
+		Dimensions: dimensions,
+		Series:     series,
+	}
+}
+
+func formatRadarValues(values []RadarDimensionValue) string {
+	if len(values) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, fmt.Sprintf("%s: %.2f", value.Dimension, value.Score))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func round(v float64, places int) float64 {

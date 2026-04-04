@@ -57,6 +57,12 @@ func TestGenerateAndExportFlow(t *testing.T) {
 	if generated.ReportID == "" {
 		t.Fatalf("expected report id")
 	}
+	if len(generated.DimensionComparisons) == 0 {
+		t.Fatalf("expected dimension comparisons in generate response")
+	}
+	if len(generated.RadarChart.Dimensions) == 0 || len(generated.RadarChart.Series) == 0 {
+		t.Fatalf("expected radar chart data in generate response")
+	}
 
 	exportReq := httptest.NewRequest(http.MethodGet, "/api/reports/"+generated.ReportID+"/export?format=markdown", nil)
 	exportW := httptest.NewRecorder()

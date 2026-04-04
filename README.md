@@ -44,6 +44,11 @@ Request example:
 }
 ```
 
+Response includes:
+- `scores`: original per-interviewer scoring data
+- `dimension_comparisons`: aggregated per-dimension comparison across interviewers
+- `radar_chart`: radar-ready dimension/series payload generated from raw dimension scores
+
 ### Export report
 
 `GET /api/reports/{reportID}/export?format=json|markdown`
