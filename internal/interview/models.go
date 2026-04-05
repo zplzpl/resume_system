@@ -1,6 +1,7 @@
 package interview
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -63,6 +64,52 @@ type CalendarResult struct {
 	RangeFrom time.Time    `json:"range_from"`
 	RangeTo   time.Time    `json:"range_to"`
 	Items     []Interview  `json:"items"`
+}
+
+var (
+	ErrQuestionRecommendationNotFound = errors.New("question recommendation not found")
+)
+
+type QuestionCategory string
+
+const (
+	QuestionCategoryExperienceFollowUp   QuestionCategory = "experience_follow_up"
+	QuestionCategoryCapabilityAssessment QuestionCategory = "capability_assessment"
+)
+
+type CandidateSnapshot struct {
+	ID                    string
+	FullName              string
+	CurrentCompany        string
+	CurrentTitle          string
+	HighestEducation      string
+	TotalExperienceMonths int
+	Skills                []string
+}
+
+type GenerateQuestionRecommendationRequest struct {
+	JobTitle       string
+	JobDescription string
+}
+
+type RecommendedQuestion struct {
+	Category  QuestionCategory `json:"category"`
+	Question  string           `json:"question"`
+	Focus     string           `json:"focus"`
+	Reference string           `json:"reference,omitempty"`
+}
+
+type QuestionRecommendation struct {
+	InterviewID     string                `json:"interview_id"`
+	CandidateID     string                `json:"candidate_id"`
+	Round           string                `json:"round"`
+	JobTitle        string                `json:"job_title,omitempty"`
+	JobDescription  string                `json:"job_description,omitempty"`
+	Questions       []RecommendedQuestion `json:"questions"`
+	FallbackUsed    bool                  `json:"fallback_used"`
+	FallbackReason  string                `json:"fallback_reason,omitempty"`
+	GeneratedSource string                `json:"generated_source"`
+	GeneratedAt     time.Time             `json:"generated_at"`
 }
 
 func ParseStatus(raw string) (Status, error) {

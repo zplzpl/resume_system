@@ -11,6 +11,7 @@ type MemoryRepository struct {
 	mu                sync.RWMutex
 	interviews        map[string]Interview
 	evaluationArchive map[string][]Evaluation
+	questionBank      map[string]QuestionRecommendation
 	notificationLog   []NotificationEvent
 	nextInterview     int64
 	nextEvent         int64
@@ -21,6 +22,7 @@ func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{
 		interviews:        make(map[string]Interview),
 		evaluationArchive: make(map[string][]Evaluation),
+		questionBank:      make(map[string]QuestionRecommendation),
 	}
 }
 
@@ -163,6 +165,24 @@ func (r *MemoryRepository) ListLatestEvaluationsByCandidate(candidateID string) 
 	return out
 }
 
+func (r *MemoryRepository) SaveQuestionRecommendation(item QuestionRecommendation) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.questionBank[item.InterviewID] = cloneQuestionRecommendation(item)
+}
+
+func (r *MemoryRepository) GetQuestionRecommendation(interviewID string) (QuestionRecommendation, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	item, ok := r.questionBank[interviewID]
+	if !ok {
+		return QuestionRecommendation{}, false
+	}
+	return cloneQuestionRecommendation(item), true
+}
+
 func cloneInterview(in Interview) Interview {
 	out := in
 	out.InterviewerIDs = append([]string(nil), in.InterviewerIDs...)
@@ -181,4 +201,10 @@ func cloneEvaluation(in Evaluation) Evaluation {
 
 func cloneCapabilityScores(in []CapabilityScore) []CapabilityScore {
 	return append([]CapabilityScore(nil), in...)
+}
+
+func cloneQuestionRecommendation(in QuestionRecommendation) QuestionRecommendation {
+	out := in
+	out.Questions = append([]RecommendedQuestion(nil), in.Questions...)
+	return out
 }

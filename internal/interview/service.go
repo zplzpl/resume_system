@@ -50,11 +50,25 @@ type OperationResult struct {
 }
 
 type Service struct {
-	repo *MemoryRepository
+	repo        *MemoryRepository
+	questionGen QuestionGenerator
 }
 
 func NewService(repo *MemoryRepository) *Service {
-	return &Service{repo: repo}
+	return &Service{
+		repo:        repo,
+		questionGen: NewDefaultQuestionGenerator(),
+	}
+}
+
+func NewServiceWithQuestionGenerator(repo *MemoryRepository, generator QuestionGenerator) *Service {
+	if generator == nil {
+		generator = NewDefaultQuestionGenerator()
+	}
+	return &Service{
+		repo:        repo,
+		questionGen: generator,
+	}
 }
 
 func (s *Service) Create(req CreateRequest) (OperationResult, error) {
@@ -194,6 +208,10 @@ func IsInterviewNotFound(err error) bool {
 	return errors.Is(err, ErrInterviewNotFound)
 }
 
+func IsQuestionRecommendationNotFound(err error) bool {
+	return errors.Is(err, ErrQuestionRecommendationNotFound)
+}
+
 func ExtractConflictError(err error) *ConflictError {
 	var conflictErr *ConflictError
 	if errors.As(err, &conflictErr) {
@@ -241,6 +259,15 @@ func (s *Service) detectConflicts(target Interview, excludeID string) []Conflict
 	}
 
 	return conflicts
+}
+
+func (s *Service) GetInterview(id string) (Interview, error) {
+	id = strings.TrimSpace(id)
+	item, ok := s.repo.GetInterview(id)
+	if !ok {
+		return Interview{}, fmt.Errorf("%w: %s", ErrInterviewNotFound, id)
+	}
+	return item, nil
 }
 
 func buildNotificationEvents(item Interview, eventType string) []NotificationEvent {

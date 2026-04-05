@@ -690,6 +690,143 @@ func TestInterviewEvaluationValidationAndPermission(t *testing.T) {
 	}
 }
 
+func TestInterviewQuestionRecommendationGenerateAndGet(t *testing.T) {
+	router := mustRouter(t)
+	hrToken := signToken(t, "user_hr", "hr")
+
+	candidateID := uploadResumeAndGetCandidateID(t, router, hrToken, "question_resume.pdf", "Name: Question Candidate\nEmail: q@example.com\nCurrent Company: NovaTech\nTitle: Senior Backend Engineer\nSkills: Go, SQL, Redis\nExperience: 6 years\n")
+	interviewID := createInterview(t, router, hrToken, map[string]any{
+		"candidate_id":    candidateID,
+		"interviewer_ids": []string{"iv_q_1"},
+		"starts_at":       "2026-04-12T09:00:00Z",
+		"ends_at":         "2026-04-12T10:00:00Z",
+		"round":           "round-1",
+	})
+
+	payload, _ := json.Marshal(map[string]any{
+		"job_title":       "Backend Engineer",
+		"job_description": "The role requires Go and SQL expertise, system design for architecture, cross-functional collaboration, and service performance optimization.",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/interviews/"+interviewID+"/question-recommendations", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer "+hrToken)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Generated      bool `json:"generated"`
+		Recommendation struct {
+			InterviewID     string `json:"interview_id"`
+			FallbackUsed    bool   `json:"fallback_used"`
+			GeneratedSource string `json:"generated_source"`
+			Questions       []struct {
+				Category string `json:"category"`
+			} `json:"questions"`
+		} `json:"recommendation"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal recommendation response: %v", err)
+	}
+	if !resp.Generated {
+		t.Fatalf("expected generated=true")
+	}
+	if resp.Recommendation.InterviewID != interviewID {
+		t.Fatalf("expected interview id %q, got %q", interviewID, resp.Recommendation.InterviewID)
+	}
+	if resp.Recommendation.FallbackUsed {
+		t.Fatalf("expected non-fallback recommendation")
+	}
+	if resp.Recommendation.GeneratedSource != "ai_synthesizer" {
+		t.Fatalf("expected generated_source ai_synthesizer, got %q", resp.Recommendation.GeneratedSource)
+	}
+	if len(resp.Recommendation.Questions) < 4 {
+		t.Fatalf("expected at least 4 questions, got %d", len(resp.Recommendation.Questions))
+	}
+	assertQuestionCategoryCoverage(t, resp.Recommendation.Questions)
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/interviews/"+interviewID+"/question-recommendations", nil)
+	getReq.Header.Set("Authorization", "Bearer "+hrToken)
+	getW := httptest.NewRecorder()
+	router.ServeHTTP(getW, getReq)
+	if getW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, getW.Code, getW.Body.String())
+	}
+
+	var getResp struct {
+		Recommendation struct {
+			InterviewID string `json:"interview_id"`
+			Questions   []any  `json:"questions"`
+		} `json:"recommendation"`
+	}
+	if err := json.Unmarshal(getW.Body.Bytes(), &getResp); err != nil {
+		t.Fatalf("unmarshal get recommendation response: %v", err)
+	}
+	if getResp.Recommendation.InterviewID != interviewID {
+		t.Fatalf("expected interview id %q, got %q", interviewID, getResp.Recommendation.InterviewID)
+	}
+	if len(getResp.Recommendation.Questions) == 0 {
+		t.Fatalf("expected persisted recommendation questions")
+	}
+}
+
+func TestInterviewQuestionRecommendationFallback(t *testing.T) {
+	router := mustRouter(t)
+	hrToken := signToken(t, "user_hr", "hr")
+
+	candidateID := uploadResumeAndGetCandidateID(t, router, hrToken, "question_fallback_resume.pdf", "Name: Fallback Candidate\nEmail: fallback@example.com\nSkills: Go\n")
+	interviewID := createInterview(t, router, hrToken, map[string]any{
+		"candidate_id":    candidateID,
+		"interviewer_ids": []string{"iv_q_fb"},
+		"starts_at":       "2026-04-13T09:00:00Z",
+		"ends_at":         "2026-04-13T10:00:00Z",
+		"round":           "round-1",
+	})
+
+	payload, _ := json.Marshal(map[string]any{
+		"job_title": "Platform Engineer",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/interviews/"+interviewID+"/question-recommendations", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer "+hrToken)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Recommendation struct {
+			FallbackUsed    bool   `json:"fallback_used"`
+			FallbackReason  string `json:"fallback_reason"`
+			GeneratedSource string `json:"generated_source"`
+			Questions       []struct {
+				Category string `json:"category"`
+			} `json:"questions"`
+		} `json:"recommendation"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal fallback recommendation response: %v", err)
+	}
+	if !resp.Recommendation.FallbackUsed {
+		t.Fatalf("expected fallback recommendation")
+	}
+	if resp.Recommendation.GeneratedSource != "template_fallback" {
+		t.Fatalf("expected generated_source template_fallback, got %q", resp.Recommendation.GeneratedSource)
+	}
+	if resp.Recommendation.FallbackReason == "" {
+		t.Fatalf("expected fallback reason")
+	}
+	if len(resp.Recommendation.Questions) < 4 {
+		t.Fatalf("expected at least 4 fallback questions, got %d", len(resp.Recommendation.Questions))
+	}
+	assertQuestionCategoryCoverage(t, resp.Recommendation.Questions)
+}
+
 func mustRouter(t *testing.T) http.Handler {
 	t.Helper()
 	cfg := config.Config{
@@ -837,6 +974,25 @@ func assertCalendarCount(t *testing.T, body []byte, want int) {
 	}
 	if len(resp.Calendar.Items) != want {
 		t.Fatalf("expected %d items, got %d", want, len(resp.Calendar.Items))
+	}
+}
+
+func assertQuestionCategoryCoverage(t *testing.T, questions []struct {
+	Category string `json:"category"`
+}) {
+	t.Helper()
+	var hasExperience bool
+	var hasCapability bool
+	for _, item := range questions {
+		if item.Category == "experience_follow_up" {
+			hasExperience = true
+		}
+		if item.Category == "capability_assessment" {
+			hasCapability = true
+		}
+	}
+	if !hasExperience || !hasCapability {
+		t.Fatalf("expected category coverage (experience_follow_up + capability_assessment), got %+v", questions)
 	}
 }
 
