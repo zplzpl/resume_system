@@ -265,6 +265,97 @@ func TestRetryFailedResume(t *testing.T) {
 	}
 }
 
+func TestCandidateSearchWithCombinedFiltersAndStatusLayer(t *testing.T) {
+	router := mustRouter(t)
+	token := signToken(t, "user_hr", "hr")
+
+	candidateA := uploadResumeAndGetCandidateID(t, router, token, "alice_resume.pdf", "Name: Alice Zhang\nEmail: alice@example.com\nCurrent Company: ACME Cloud\nEducation: Tsinghua University\nSkills: Go, SQL\n")
+	candidateB := uploadResumeAndGetCandidateID(t, router, token, "bob_resume.pdf", "Name: Bob Li\nEmail: bob@example.com\nCurrent Company: Globex\nEducation: Stanford University\nSkills: Java, Spring\n")
+
+	updateCandidateStatusLayer(t, router, token, candidateA, "screening")
+	updateCandidateStatusLayer(t, router, token, candidateB, "interview")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/candidates?keyword=go&company=acme&school=tsinghua&status_layer=screening", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var searchResp struct {
+		Items []struct {
+			ID          string `json:"id"`
+			StatusLayer string `json:"status_layer"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &searchResp); err != nil {
+		t.Fatalf("unmarshal search response: %v", err)
+	}
+	if len(searchResp.Items) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(searchResp.Items))
+	}
+	if searchResp.Items[0].ID != candidateA {
+		t.Fatalf("expected candidate %s, got %s", candidateA, searchResp.Items[0].ID)
+	}
+	if searchResp.Items[0].StatusLayer != "screening" {
+		t.Fatalf("expected status_layer screening, got %q", searchResp.Items[0].StatusLayer)
+	}
+
+	reqMulti := httptest.NewRequest(http.MethodGet, "/api/v1/candidates?status_layer=screening,interview", nil)
+	reqMulti.Header.Set("Authorization", "Bearer "+token)
+	wMulti := httptest.NewRecorder()
+	router.ServeHTTP(wMulti, reqMulti)
+	if wMulti.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, wMulti.Code, wMulti.Body.String())
+	}
+	var multiResp struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(wMulti.Body.Bytes(), &multiResp); err != nil {
+		t.Fatalf("unmarshal multi search response: %v", err)
+	}
+	if len(multiResp.Items) != 2 {
+		t.Fatalf("expected 2 candidates for multi status filter, got %d", len(multiResp.Items))
+	}
+}
+
+func TestCandidateStatusLayerValidation(t *testing.T) {
+	router := mustRouter(t)
+	token := signToken(t, "user_hr", "hr")
+
+	candidateID := uploadResumeAndGetCandidateID(t, router, token, "status_check_resume.pdf", "Name: Status Check\nEmail: status@example.com\nSkills: Go\n")
+
+	badStatusReq := httptest.NewRequest(http.MethodPatch, "/api/v1/candidates/"+candidateID+"/status-layer", strings.NewReader(`{"status_layer":"unknown"}`))
+	badStatusReq.Header.Set("Authorization", "Bearer "+token)
+	badStatusReq.Header.Set("Content-Type", "application/json")
+	badStatusW := httptest.NewRecorder()
+	router.ServeHTTP(badStatusW, badStatusReq)
+	if badStatusW.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadRequest, badStatusW.Code, badStatusW.Body.String())
+	}
+
+	badFilterReq := httptest.NewRequest(http.MethodGet, "/api/v1/candidates?status_layer=unknown", nil)
+	badFilterReq.Header.Set("Authorization", "Bearer "+token)
+	badFilterW := httptest.NewRecorder()
+	router.ServeHTTP(badFilterW, badFilterReq)
+	if badFilterW.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadRequest, badFilterW.Code, badFilterW.Body.String())
+	}
+
+	notFoundReq := httptest.NewRequest(http.MethodPatch, "/api/v1/candidates/cand_not_exist/status-layer", strings.NewReader(`{"status_layer":"screening"}`))
+	notFoundReq.Header.Set("Authorization", "Bearer "+token)
+	notFoundReq.Header.Set("Content-Type", "application/json")
+	notFoundW := httptest.NewRecorder()
+	router.ServeHTTP(notFoundW, notFoundReq)
+	if notFoundW.Code != http.StatusNotFound {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusNotFound, notFoundW.Code, notFoundW.Body.String())
+	}
+}
+
 func mustRouter(t *testing.T) http.Handler {
 	t.Helper()
 	cfg := config.Config{
@@ -277,6 +368,54 @@ func mustRouter(t *testing.T) http.Handler {
 		t.Fatalf("new router: %v", err)
 	}
 	return router
+}
+
+func uploadResumeAndGetCandidateID(t *testing.T, router http.Handler, token, fileName, content string) string {
+	t.Helper()
+
+	req := newMultipartRequest(t, http.MethodPost, "/api/v1/resumes/upload", nil, []multipartFile{
+		{FieldName: "file", FileName: fileName, Content: content},
+	})
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Candidate struct {
+			ID string `json:"id"`
+		} `json:"candidate"`
+		Resume struct {
+			ParseStatus string `json:"parse_status"`
+		} `json:"resume"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal upload response: %v", err)
+	}
+	if resp.Resume.ParseStatus != "success" {
+		t.Fatalf("expected parse status success, got %q", resp.Resume.ParseStatus)
+	}
+	if resp.Candidate.ID == "" {
+		t.Fatalf("expected candidate id from upload response")
+	}
+	return resp.Candidate.ID
+}
+
+func updateCandidateStatusLayer(t *testing.T, router http.Handler, token, candidateID, status string) {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/candidates/"+candidateID+"/status-layer", strings.NewReader(`{"status_layer":"`+status+`"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, w.Code, w.Body.String())
+	}
 }
 
 func signToken(t *testing.T, sub, role string) string {

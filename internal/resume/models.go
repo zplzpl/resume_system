@@ -45,20 +45,32 @@ type ResumeRecord struct {
 }
 
 type CandidateProfile struct {
-	ID                    string    `json:"id"`
-	FullName              string    `json:"full_name"`
-	Email                 string    `json:"email,omitempty"`
-	Phone                 string    `json:"phone,omitempty"`
-	CurrentCompany        string    `json:"current_company,omitempty"`
-	CurrentTitle          string    `json:"current_title,omitempty"`
-	Location              string    `json:"location,omitempty"`
-	HighestEducation      string    `json:"highest_education,omitempty"`
-	TotalExperienceMonths int       `json:"total_experience_months,omitempty"`
-	Skills                []string  `json:"skills,omitempty"`
-	SourceResumeID        string    `json:"source_resume_id,omitempty"`
-	CreatedAt             time.Time `json:"created_at"`
-	UpdatedAt             time.Time `json:"updated_at"`
+	ID                    string               `json:"id"`
+	FullName              string               `json:"full_name"`
+	Email                 string               `json:"email,omitempty"`
+	Phone                 string               `json:"phone,omitempty"`
+	CurrentCompany        string               `json:"current_company,omitempty"`
+	CurrentTitle          string               `json:"current_title,omitempty"`
+	Location              string               `json:"location,omitempty"`
+	HighestEducation      string               `json:"highest_education,omitempty"`
+	StatusLayer           CandidateStatusLayer `json:"status_layer"`
+	TotalExperienceMonths int                  `json:"total_experience_months,omitempty"`
+	Skills                []string             `json:"skills,omitempty"`
+	SourceResumeID        string               `json:"source_resume_id,omitempty"`
+	CreatedAt             time.Time            `json:"created_at"`
+	UpdatedAt             time.Time            `json:"updated_at"`
 }
+
+type CandidateStatusLayer string
+
+const (
+	CandidateStatusNew       CandidateStatusLayer = "new"
+	CandidateStatusScreening CandidateStatusLayer = "screening"
+	CandidateStatusInterview CandidateStatusLayer = "interview"
+	CandidateStatusOffer     CandidateStatusLayer = "offer"
+	CandidateStatusHired     CandidateStatusLayer = "hired"
+	CandidateStatusArchived  CandidateStatusLayer = "archived"
+)
 
 // UploadFile contains one uploaded file from the API layer.
 type UploadFile struct {

@@ -1,6 +1,7 @@
 package resume
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -79,11 +80,32 @@ func (s *Service) GetResume(id string) (UploadResult, bool) {
 }
 
 func (s *Service) ListCandidates() []CandidateProfile {
-	return s.repo.ListCandidates()
+	return s.SearchCandidates(CandidateSearchOptions{})
+}
+
+func (s *Service) SearchCandidates(options CandidateSearchOptions) []CandidateProfile {
+	options.Keyword = strings.TrimSpace(options.Keyword)
+	options.Skill = strings.TrimSpace(options.Skill)
+	options.Company = strings.TrimSpace(options.Company)
+	options.School = strings.TrimSpace(options.School)
+	return s.repo.SearchCandidates(options)
 }
 
 func (s *Service) CreateManualCandidate(name, email, phone string) CandidateProfile {
 	return s.repo.CreateCandidate(strings.TrimSpace(name), strings.TrimSpace(email), strings.TrimSpace(phone))
+}
+
+func (s *Service) UpdateCandidateStatusLayer(candidateID, statusRaw string) (CandidateProfile, error) {
+	status, err := ParseCandidateStatusLayer(statusRaw)
+	if err != nil {
+		return CandidateProfile{}, err
+	}
+
+	candidate, ok := s.repo.UpdateCandidateStatusLayer(strings.TrimSpace(candidateID), status)
+	if !ok {
+		return CandidateProfile{}, fmt.Errorf("%w: %s", ErrCandidateNotFound, candidateID)
+	}
+	return candidate, nil
 }
 
 func (s *Service) parseAndPersist(resume ResumeRecord) (UploadResult, error) {
@@ -115,12 +137,18 @@ func (s *Service) parseAndPersist(resume ResumeRecord) (UploadResult, error) {
 }
 
 func (s *Service) findCandidate(candidateID string) *CandidateProfile {
-	items := s.repo.ListCandidates()
-	for _, candidate := range items {
-		if candidate.ID == candidateID {
-			copy := candidate
-			return &copy
-		}
+	candidate, ok := s.repo.GetCandidate(candidateID)
+	if !ok {
+		return nil
 	}
-	return nil
+	copy := candidate
+	return &copy
+}
+
+func IsCandidateNotFound(err error) bool {
+	return errors.Is(err, ErrCandidateNotFound)
+}
+
+func IsInvalidStatusLayer(err error) bool {
+	return errors.Is(err, ErrInvalidStatusLayer)
 }
