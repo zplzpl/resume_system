@@ -54,7 +54,7 @@ Supabase Auth + RBAC skeleton for resume system backend.
 - Structured interview report generation:
   - One-click generation from candidate profile + latest evaluation archives
   - Deterministic report ID and stable score ordering on repeated generation
-  - Includes candidate information, score details, interviewer comments, and hiring recommendation
+  - Includes candidate information, score details, interviewer comments, hiring recommendation, per-dimension interviewer comparison, and radar-chart-ready payload
   - Supports JSON and Markdown export formats with explicit failure messages
 
 ## Environment Variables

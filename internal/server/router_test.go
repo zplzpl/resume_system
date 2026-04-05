@@ -635,18 +635,19 @@ func TestInterviewEvaluationSubmitArchiveAndCandidateLatestView(t *testing.T) {
 func TestInterviewReportGenerateDeterministicAndExport(t *testing.T) {
 	router := mustRouter(t)
 	hrToken := signToken(t, "user_hr", "hr")
-	interviewerToken := signToken(t, "iv_report_1", "interviewer")
+	interviewerToken1 := signToken(t, "iv_report_1", "interviewer")
+	interviewerToken2 := signToken(t, "iv_report_2", "interviewer")
 
 	candidateID := uploadResumeAndGetCandidateID(t, router, hrToken, "report_resume.pdf", "Name: Report Candidate\nEmail: report@example.com\nCurrent Company: Acme\nTitle: Backend Engineer\nSkills: Go\n")
 	interviewID := createInterview(t, router, hrToken, map[string]any{
 		"candidate_id":    candidateID,
-		"interviewer_ids": []string{"iv_report_1"},
+		"interviewer_ids": []string{"iv_report_1", "iv_report_2"},
 		"starts_at":       "2026-04-12T09:00:00Z",
 		"ends_at":         "2026-04-12T10:00:00Z",
 		"round":           "round-1",
 	})
 
-	submitEvaluation(t, router, interviewerToken, interviewID, map[string]any{
+	submitEvaluation(t, router, interviewerToken1, interviewID, map[string]any{
 		"capability_scores": []map[string]any{
 			{"dimension": "technical_depth", "score": 5, "comment": "excellent"},
 			{"dimension": "problem_solving", "score": 4, "comment": "good decomposition"},
@@ -655,6 +656,16 @@ func TestInterviewReportGenerateDeterministicAndExport(t *testing.T) {
 		},
 		"overall_comment": "ready for next stage",
 		"conclusion":      "strong_hire",
+	}, http.StatusOK)
+	submitEvaluation(t, router, interviewerToken2, interviewID, map[string]any{
+		"capability_scores": []map[string]any{
+			{"dimension": "technical_depth", "score": 4, "comment": "solid"},
+			{"dimension": "problem_solving", "score": 5, "comment": "excellent"},
+			{"dimension": "communication", "score": 3, "comment": "improving"},
+			{"dimension": "collaboration", "score": 4, "comment": "works well"},
+		},
+		"overall_comment": "good potential",
+		"conclusion":      "hire",
 	}, http.StatusOK)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/candidates/"+candidateID+"/interview-report", nil)
@@ -672,7 +683,21 @@ func TestInterviewReportGenerateDeterministicAndExport(t *testing.T) {
 			HiringRecommendation  string  `json:"hiring_recommendation"`
 			SourceEvaluationCount int     `json:"source_evaluation_count"`
 			GeneratedAt           string  `json:"generated_at"`
-			Candidate             struct {
+			DimensionComparisons  []struct {
+				Dimension string `json:"dimension"`
+				Scores    []struct {
+					InterviewerID string `json:"interviewer_id"`
+				} `json:"scores"`
+			} `json:"dimension_comparisons"`
+			RadarChart struct {
+				Dimensions []struct {
+					Dimension string `json:"dimension"`
+				} `json:"dimensions"`
+				Series []struct {
+					InterviewerID string `json:"interviewer_id"`
+				} `json:"series"`
+			} `json:"radar_chart"`
+			Candidate struct {
 				ID       string `json:"id"`
 				FullName string `json:"full_name"`
 			} `json:"candidate"`
@@ -693,8 +718,17 @@ func TestInterviewReportGenerateDeterministicAndExport(t *testing.T) {
 	if firstResp.Report.HiringRecommendation == "" {
 		t.Fatalf("expected hiring recommendation")
 	}
-	if firstResp.Report.SourceEvaluationCount != 1 {
-		t.Fatalf("expected source evaluation count 1, got %d", firstResp.Report.SourceEvaluationCount)
+	if firstResp.Report.SourceEvaluationCount != 2 {
+		t.Fatalf("expected source evaluation count 2, got %d", firstResp.Report.SourceEvaluationCount)
+	}
+	if len(firstResp.Report.DimensionComparisons) == 0 {
+		t.Fatalf("expected dimension comparisons to be present")
+	}
+	if len(firstResp.Report.RadarChart.Dimensions) == 0 {
+		t.Fatalf("expected radar chart dimensions to be present")
+	}
+	if len(firstResp.Report.RadarChart.Series) != 2 {
+		t.Fatalf("expected one radar series per interviewer, got %d", len(firstResp.Report.RadarChart.Series))
 	}
 
 	reqRepeat := httptest.NewRequest(http.MethodPost, "/api/v1/candidates/"+candidateID+"/interview-report", nil)
@@ -733,6 +767,12 @@ func TestInterviewReportGenerateDeterministicAndExport(t *testing.T) {
 	if !strings.Contains(exportJSONW.Body.String(), `"final_comment"`) {
 		t.Fatalf("expected final_comment in json export body")
 	}
+	if !strings.Contains(exportJSONW.Body.String(), `"dimension_comparisons"`) {
+		t.Fatalf("expected dimension_comparisons in json export body")
+	}
+	if !strings.Contains(exportJSONW.Body.String(), `"radar_chart"`) {
+		t.Fatalf("expected radar_chart in json export body")
+	}
 
 	exportMarkdownReq := httptest.NewRequest(http.MethodGet, "/api/v1/interview-reports/"+firstResp.Report.ReportID+"/export?format=markdown", nil)
 	exportMarkdownReq.Header.Set("Authorization", "Bearer "+hrToken)
@@ -743,6 +783,12 @@ func TestInterviewReportGenerateDeterministicAndExport(t *testing.T) {
 	}
 	if !strings.Contains(exportMarkdownW.Body.String(), "## Score Details") {
 		t.Fatalf("expected markdown score section")
+	}
+	if !strings.Contains(exportMarkdownW.Body.String(), "## Dimension Comparison") {
+		t.Fatalf("expected markdown comparison section")
+	}
+	if !strings.Contains(exportMarkdownW.Body.String(), "## Radar Chart Data") {
+		t.Fatalf("expected markdown radar section")
 	}
 }
 

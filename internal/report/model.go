@@ -46,17 +46,56 @@ type EvaluationScore struct {
 	SubmittedAt      time.Time         `json:"submitted_at"`
 }
 
+type DimensionScorePoint struct {
+	Round         string  `json:"round"`
+	InterviewID   string  `json:"interview_id"`
+	InterviewerID string  `json:"interviewer_id"`
+	Score         float64 `json:"score"`
+}
+
+type DimensionComparison struct {
+	Dimension    string                `json:"dimension"`
+	AverageScore float64               `json:"average_score"`
+	HighestScore float64               `json:"highest_score"`
+	LowestScore  float64               `json:"lowest_score"`
+	Scores       []DimensionScorePoint `json:"scores"`
+}
+
+type RadarDimension struct {
+	Dimension string  `json:"dimension"`
+	MaxScore  float64 `json:"max_score"`
+}
+
+type RadarDimensionValue struct {
+	Dimension string  `json:"dimension"`
+	Score     float64 `json:"score"`
+}
+
+type RadarSeries struct {
+	Round         string                `json:"round"`
+	InterviewID   string                `json:"interview_id"`
+	InterviewerID string                `json:"interviewer_id"`
+	Values        []RadarDimensionValue `json:"values"`
+}
+
+type RadarChartData struct {
+	Dimensions []RadarDimension `json:"dimensions"`
+	Series     []RadarSeries    `json:"series"`
+}
+
 type StructuredInterviewReport struct {
-	ReportID              string            `json:"report_id"`
-	Candidate             CandidateSnapshot `json:"candidate"`
-	Scores                []EvaluationScore `json:"scores"`
-	FinalComment          string            `json:"final_comment"`
-	HiringRecommendation  string            `json:"hiring_recommendation"`
-	AverageScore          float64           `json:"average_score"`
-	ConclusionBreakdown   map[string]int    `json:"conclusion_breakdown"`
-	SourceEvaluationCount int               `json:"source_evaluation_count"`
-	GeneratedBy           string            `json:"generated_by,omitempty"`
-	GeneratedAt           time.Time         `json:"generated_at"`
+	ReportID              string                `json:"report_id"`
+	Candidate             CandidateSnapshot     `json:"candidate"`
+	Scores                []EvaluationScore     `json:"scores"`
+	DimensionComparisons  []DimensionComparison `json:"dimension_comparisons"`
+	RadarChart            RadarChartData        `json:"radar_chart"`
+	FinalComment          string                `json:"final_comment"`
+	HiringRecommendation  string                `json:"hiring_recommendation"`
+	AverageScore          float64               `json:"average_score"`
+	ConclusionBreakdown   map[string]int        `json:"conclusion_breakdown"`
+	SourceEvaluationCount int                   `json:"source_evaluation_count"`
+	GeneratedBy           string                `json:"generated_by,omitempty"`
+	GeneratedAt           time.Time             `json:"generated_at"`
 }
 
 type ValidationError struct {
