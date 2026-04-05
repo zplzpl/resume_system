@@ -9,7 +9,9 @@ import (
 )
 
 var (
-	ErrInterviewNotFound = errors.New("interview not found")
+	ErrInterviewNotFound         = errors.New("interview not found")
+	ErrCandidateTokenNotFound    = errors.New("candidate token not found")
+	ErrNoPendingRescheduleReview = errors.New("no pending reschedule request")
 )
 
 type ConflictError struct {
@@ -47,6 +49,28 @@ type OperationResult struct {
 	Interview             Interview           `json:"interview"`
 	Notifications         []NotificationEvent `json:"notifications"`
 	NotificationsEnqueued int                 `json:"notifications_enqueued"`
+	ProcessRecords        []ProcessRecord     `json:"process_records,omitempty"`
+}
+
+type CandidateResponseRequest struct {
+	Action           string
+	ProposedStartsAt *time.Time
+	ProposedEndsAt   *time.Time
+	Note             string
+}
+
+type ReviewRescheduleRequest struct {
+	Decision    string
+	ProcessedBy string
+	Note        string
+}
+
+type CandidateResponseResult struct {
+	Interview             Interview           `json:"interview"`
+	RescheduleRequest     *RescheduleRequest  `json:"reschedule_request,omitempty"`
+	Notifications         []NotificationEvent `json:"notifications"`
+	NotificationsEnqueued int                 `json:"notifications_enqueued"`
+	ProcessRecords        []ProcessRecord     `json:"process_records"`
 }
 
 type Service struct {
@@ -75,6 +99,7 @@ func (s *Service) Create(req CreateRequest) (OperationResult, error) {
 		InterviewerIDs: interviewerIDs,
 		Round:          normalizeRound(req.Round),
 		Status:         StatusScheduled,
+		CandidateState: CandidateResponseAwaiting,
 		StartsAt:       req.StartsAt.UTC(),
 		EndsAt:         req.EndsAt.UTC(),
 		Note:           strings.TrimSpace(req.Note),
@@ -88,10 +113,19 @@ func (s *Service) Create(req CreateRequest) (OperationResult, error) {
 
 	created := s.repo.CreateInterview(item)
 	events := s.repo.EnqueueNotifications(buildNotificationEvents(created, "interview.created"))
+	s.repo.AddProcessRecord(ProcessRecord{
+		InterviewID: created.ID,
+		Action:      "interview.scheduled",
+		ActorType:   actorTypeForUser(created.CreatedBy),
+		ActorID:     created.CreatedBy,
+		Note:        created.Note,
+	})
+	records := s.repo.ListProcessRecords(created.ID)
 	return OperationResult{
 		Interview:             created,
 		Notifications:         events,
 		NotificationsEnqueued: len(events),
+		ProcessRecords:        records,
 	}, nil
 }
 
@@ -143,6 +177,9 @@ func (s *Service) Update(id string, req UpdateRequest) (OperationResult, error) 
 	} else if timeChanged && item.Status == StatusScheduled {
 		item.Status = StatusRescheduled
 	}
+	if timeChanged {
+		item.CandidateState = CandidateResponseAwaiting
+	}
 
 	item.ColorTag = ComputeColorTag(item.Round, item.Status)
 	if conflicts := s.detectConflicts(item, item.ID); len(conflicts) > 0 {
@@ -151,11 +188,183 @@ func (s *Service) Update(id string, req UpdateRequest) (OperationResult, error) 
 
 	updated := s.repo.UpdateInterview(item)
 	events := s.repo.EnqueueNotifications(buildNotificationEvents(updated, "interview.updated"))
+	s.repo.AddProcessRecord(ProcessRecord{
+		InterviewID: updated.ID,
+		Action:      "interview.updated",
+		ActorType:   actorTypeForUser(updated.CreatedBy),
+		ActorID:     updated.CreatedBy,
+		Note:        updated.Note,
+	})
+	records := s.repo.ListProcessRecords(updated.ID)
 	return OperationResult{
 		Interview:             updated,
 		Notifications:         events,
 		NotificationsEnqueued: len(events),
+		ProcessRecords:        records,
 	}, nil
+}
+
+func (s *Service) SubmitCandidateResponse(token string, req CandidateResponseRequest) (CandidateResponseResult, error) {
+	token = strings.TrimSpace(token)
+	item, ok := s.repo.GetInterviewByCandidateToken(token)
+	if !ok {
+		return CandidateResponseResult{}, fmt.Errorf("%w: %s", ErrCandidateTokenNotFound, token)
+	}
+
+	action := strings.ToLower(strings.TrimSpace(req.Action))
+	switch action {
+	case "confirm":
+		item.CandidateState = CandidateResponseConfirmed
+		if item.Status == StatusReschedulePending {
+			item.Status = StatusScheduled
+		}
+		item.ColorTag = ComputeColorTag(item.Round, item.Status)
+		updated := s.repo.UpdateInterview(item)
+		events := s.repo.EnqueueNotifications(buildHRNotificationEvents(updated, "interview.candidate_confirmed"))
+		s.repo.AddProcessRecord(ProcessRecord{
+			InterviewID: updated.ID,
+			Action:      "candidate.confirmed",
+			ActorType:   "candidate",
+			ActorID:     updated.CandidateID,
+			Note:        strings.TrimSpace(req.Note),
+		})
+		records := s.repo.ListProcessRecords(updated.ID)
+		return CandidateResponseResult{
+			Interview:             updated,
+			Notifications:         events,
+			NotificationsEnqueued: len(events),
+			ProcessRecords:        records,
+		}, nil
+	case "reschedule":
+		if req.ProposedStartsAt == nil || req.ProposedEndsAt == nil {
+			return CandidateResponseResult{}, fmt.Errorf("proposed_starts_at and proposed_ends_at are required")
+		}
+		proposedStart := req.ProposedStartsAt.UTC()
+		proposedEnd := req.ProposedEndsAt.UTC()
+		if !proposedStart.Before(proposedEnd) {
+			return CandidateResponseResult{}, fmt.Errorf("proposed_starts_at must be before proposed_ends_at")
+		}
+
+		existingRequest, ok := s.repo.GetRescheduleRequest(item.ID)
+		if !ok {
+			existingRequest = RescheduleRequest{}
+		}
+		request := RescheduleRequest{
+			ID:               existingRequest.ID,
+			InterviewID:      item.ID,
+			CandidateID:      item.CandidateID,
+			ProposedStartsAt: proposedStart,
+			ProposedEndsAt:   proposedEnd,
+			Note:             strings.TrimSpace(req.Note),
+			Status:           RescheduleRequestPending,
+		}
+		request = s.repo.SaveRescheduleRequest(request)
+
+		item.Status = StatusReschedulePending
+		item.CandidateState = CandidateResponseReschedulePending
+		item.ColorTag = ComputeColorTag(item.Round, item.Status)
+		updated := s.repo.UpdateInterview(item)
+
+		events := s.repo.EnqueueNotifications(buildHRNotificationEvents(updated, "interview.reschedule_requested"))
+		s.repo.AddProcessRecord(ProcessRecord{
+			InterviewID: updated.ID,
+			Action:      "candidate.reschedule_requested",
+			ActorType:   "candidate",
+			ActorID:     updated.CandidateID,
+			Note:        request.Note,
+		})
+		records := s.repo.ListProcessRecords(updated.ID)
+		return CandidateResponseResult{
+			Interview:             updated,
+			RescheduleRequest:     &request,
+			Notifications:         events,
+			NotificationsEnqueued: len(events),
+			ProcessRecords:        records,
+		}, nil
+	default:
+		return CandidateResponseResult{}, fmt.Errorf("invalid action: %q", req.Action)
+	}
+}
+
+func (s *Service) ReviewReschedule(interviewID string, req ReviewRescheduleRequest) (CandidateResponseResult, error) {
+	interviewID = strings.TrimSpace(interviewID)
+	item, ok := s.repo.GetInterview(interviewID)
+	if !ok {
+		return CandidateResponseResult{}, fmt.Errorf("%w: %s", ErrInterviewNotFound, interviewID)
+	}
+
+	request, ok := s.repo.GetRescheduleRequest(interviewID)
+	if !ok || request.Status != RescheduleRequestPending {
+		return CandidateResponseResult{}, fmt.Errorf("%w: %s", ErrNoPendingRescheduleReview, interviewID)
+	}
+
+	decision := strings.ToLower(strings.TrimSpace(req.Decision))
+	processedBy := strings.TrimSpace(req.ProcessedBy)
+	note := strings.TrimSpace(req.Note)
+
+	eventType := ""
+	action := ""
+	switch decision {
+	case "accept":
+		if !request.ProposedStartsAt.Before(request.ProposedEndsAt) {
+			return CandidateResponseResult{}, fmt.Errorf("invalid proposed schedule range")
+		}
+		item.StartsAt = request.ProposedStartsAt.UTC()
+		item.EndsAt = request.ProposedEndsAt.UTC()
+		item.Status = StatusRescheduled
+		item.CandidateState = CandidateResponseRescheduleAccepted
+		item.ColorTag = ComputeColorTag(item.Round, item.Status)
+		if conflicts := s.detectConflicts(item, item.ID); len(conflicts) > 0 {
+			return CandidateResponseResult{}, &ConflictError{Conflicts: conflicts}
+		}
+		request.Status = RescheduleRequestAccepted
+		request.ProcessedBy = processedBy
+		request.ProcessedNote = note
+		eventType = "interview.reschedule_accepted"
+		action = "hr.reschedule_accepted"
+	case "reject":
+		item.Status = StatusScheduled
+		item.CandidateState = CandidateResponseRescheduleRejected
+		item.ColorTag = ComputeColorTag(item.Round, item.Status)
+		request.Status = RescheduleRequestRejected
+		request.ProcessedBy = processedBy
+		request.ProcessedNote = note
+		eventType = "interview.reschedule_rejected"
+		action = "hr.reschedule_rejected"
+	default:
+		return CandidateResponseResult{}, fmt.Errorf("invalid decision: %q", req.Decision)
+	}
+
+	updated := s.repo.UpdateInterview(item)
+	request = s.repo.SaveRescheduleRequest(request)
+	events := s.repo.EnqueueNotifications(buildCandidateNotificationEvents(updated, eventType))
+	s.repo.AddProcessRecord(ProcessRecord{
+		InterviewID: updated.ID,
+		Action:      action,
+		ActorType:   actorTypeForUser(processedBy),
+		ActorID:     processedBy,
+		Note:        note,
+	})
+	records := s.repo.ListProcessRecords(updated.ID)
+
+	return CandidateResponseResult{
+		Interview:             updated,
+		RescheduleRequest:     &request,
+		Notifications:         events,
+		NotificationsEnqueued: len(events),
+		ProcessRecords:        records,
+	}, nil
+}
+
+func (s *Service) ProcessRecords(interviewID string) ([]ProcessRecord, error) {
+	interviewID = strings.TrimSpace(interviewID)
+	if interviewID == "" {
+		return nil, fmt.Errorf("interview id is required")
+	}
+	if _, ok := s.repo.GetInterview(interviewID); !ok {
+		return nil, fmt.Errorf("%w: %s", ErrInterviewNotFound, interviewID)
+	}
+	return s.repo.ListProcessRecords(interviewID), nil
 }
 
 func (s *Service) Calendar(view CalendarView, anchor time.Time) CalendarResult {
@@ -192,6 +401,14 @@ func IsConflictError(err error) bool {
 
 func IsInterviewNotFound(err error) bool {
 	return errors.Is(err, ErrInterviewNotFound)
+}
+
+func IsCandidateTokenNotFound(err error) bool {
+	return errors.Is(err, ErrCandidateTokenNotFound)
+}
+
+func IsNoPendingRescheduleReview(err error) bool {
+	return errors.Is(err, ErrNoPendingRescheduleReview)
 }
 
 func ExtractConflictError(err error) *ConflictError {
@@ -272,6 +489,40 @@ func buildNotificationEvents(item Interview, eventType string) []NotificationEve
 	return events
 }
 
+func buildCandidateNotificationEvents(item Interview, eventType string) []NotificationEvent {
+	channels := []string{"in_app", "email"}
+	events := make([]NotificationEvent, 0, len(channels))
+	for _, channel := range channels {
+		events = append(events, NotificationEvent{
+			InterviewID:   item.ID,
+			RecipientID:   item.CandidateID,
+			RecipientType: "candidate",
+			Channel:       channel,
+			EventType:     eventType,
+		})
+	}
+	return events
+}
+
+func buildHRNotificationEvents(item Interview, eventType string) []NotificationEvent {
+	channels := []string{"in_app", "email"}
+	recipient := strings.TrimSpace(item.CreatedBy)
+	if recipient == "" {
+		recipient = "hr_pool"
+	}
+	events := make([]NotificationEvent, 0, len(channels))
+	for _, channel := range channels {
+		events = append(events, NotificationEvent{
+			InterviewID:   item.ID,
+			RecipientID:   recipient,
+			RecipientType: "hr",
+			Channel:       channel,
+			EventType:     eventType,
+		})
+	}
+	return events
+}
+
 func calendarRange(view CalendarView, anchor time.Time) (time.Time, time.Time) {
 	base := time.Date(anchor.Year(), anchor.Month(), anchor.Day(), 0, 0, 0, 0, time.UTC)
 	switch view {
@@ -334,6 +585,13 @@ func normalizeRound(raw string) string {
 		return "round-1"
 	}
 	return raw
+}
+
+func actorTypeForUser(actorID string) string {
+	if strings.TrimSpace(actorID) == "" {
+		return "system"
+	}
+	return "hr"
 }
 
 func maxTime(a, b time.Time) time.Time {

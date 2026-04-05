@@ -485,6 +485,138 @@ func TestInterviewUpdateTriggersNotificationAndStatusLink(t *testing.T) {
 	}
 }
 
+func TestCandidateCanConfirmInterviewViaToken(t *testing.T) {
+	router := mustRouter(t)
+	hrToken := signToken(t, "user_hr", "hr")
+
+	candidateID := uploadResumeAndGetCandidateID(t, router, hrToken, "candidate_confirm.pdf", "Name: Candidate Confirm\nEmail: confirm@example.com\nSkills: Go\n")
+	created := createInterviewDetails(t, router, hrToken, map[string]any{
+		"candidate_id":    candidateID,
+		"interviewer_ids": []string{"iv_11"},
+		"starts_at":       "2026-04-08T09:00:00Z",
+		"ends_at":         "2026-04-08T10:00:00Z",
+		"round":           "round-1",
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/interview-responses/"+created.CandidateToken, strings.NewReader(`{"action":"confirm","note":"confirmed by candidate"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Interview struct {
+			CandidateState string `json:"candidate_state"`
+		} `json:"interview"`
+		NotificationsEnqueued int `json:"notifications_enqueued"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal candidate confirm response: %v", err)
+	}
+	if resp.Interview.CandidateState != "confirmed" {
+		t.Fatalf("expected candidate_state confirmed, got %q", resp.Interview.CandidateState)
+	}
+	if resp.NotificationsEnqueued != 2 {
+		t.Fatalf("expected 2 notifications to HR, got %d", resp.NotificationsEnqueued)
+	}
+
+	records := fetchProcessActions(t, router, hrToken, created.ID)
+	if !containsString(records, "candidate.confirmed") {
+		t.Fatalf("expected process record candidate.confirmed, got %v", records)
+	}
+}
+
+func TestCandidateRescheduleRequestAndHRReviewFlow(t *testing.T) {
+	router := mustRouter(t)
+	hrToken := signToken(t, "user_hr", "hr")
+
+	candidateID := uploadResumeAndGetCandidateID(t, router, hrToken, "candidate_reschedule.pdf", "Name: Candidate Reschedule\nEmail: reschedule@example.com\nSkills: Go\n")
+	created := createInterviewDetails(t, router, hrToken, map[string]any{
+		"candidate_id":    candidateID,
+		"interviewer_ids": []string{"iv_12"},
+		"starts_at":       "2026-04-09T09:00:00Z",
+		"ends_at":         "2026-04-09T10:00:00Z",
+		"round":           "round-2",
+	})
+
+	candidateReq := httptest.NewRequest(http.MethodPost, "/api/v1/interview-responses/"+created.CandidateToken, strings.NewReader(`{"action":"reschedule","proposed_starts_at":"2026-04-09T11:00:00Z","proposed_ends_at":"2026-04-09T12:00:00Z","note":"need another slot"}`))
+	candidateReq.Header.Set("Content-Type", "application/json")
+	candidateW := httptest.NewRecorder()
+	router.ServeHTTP(candidateW, candidateReq)
+	if candidateW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, candidateW.Code, candidateW.Body.String())
+	}
+
+	var candidateResp struct {
+		Interview struct {
+			Status         string `json:"status"`
+			CandidateState string `json:"candidate_state"`
+		} `json:"interview"`
+		RescheduleRequest struct {
+			Status string `json:"status"`
+		} `json:"reschedule_request"`
+	}
+	if err := json.Unmarshal(candidateW.Body.Bytes(), &candidateResp); err != nil {
+		t.Fatalf("unmarshal candidate reschedule response: %v", err)
+	}
+	if candidateResp.Interview.Status != "reschedule_pending" {
+		t.Fatalf("expected interview status reschedule_pending, got %q", candidateResp.Interview.Status)
+	}
+	if candidateResp.Interview.CandidateState != "reschedule_pending" {
+		t.Fatalf("expected candidate_state reschedule_pending, got %q", candidateResp.Interview.CandidateState)
+	}
+	if candidateResp.RescheduleRequest.Status != "pending" {
+		t.Fatalf("expected reschedule request pending, got %q", candidateResp.RescheduleRequest.Status)
+	}
+
+	reviewReq := httptest.NewRequest(http.MethodPost, "/api/v1/interviews/"+created.ID+"/reschedule-review", strings.NewReader(`{"decision":"accept","note":"accepted by hr"}`))
+	reviewReq.Header.Set("Authorization", "Bearer "+hrToken)
+	reviewReq.Header.Set("Content-Type", "application/json")
+	reviewW := httptest.NewRecorder()
+	router.ServeHTTP(reviewW, reviewReq)
+	if reviewW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, reviewW.Code, reviewW.Body.String())
+	}
+
+	var reviewResp struct {
+		Interview struct {
+			Status         string `json:"status"`
+			CandidateState string `json:"candidate_state"`
+			StartsAt       string `json:"starts_at"`
+			EndsAt         string `json:"ends_at"`
+		} `json:"interview"`
+		RescheduleRequest struct {
+			Status string `json:"status"`
+		} `json:"reschedule_request"`
+	}
+	if err := json.Unmarshal(reviewW.Body.Bytes(), &reviewResp); err != nil {
+		t.Fatalf("unmarshal review response: %v", err)
+	}
+	if reviewResp.Interview.Status != "rescheduled" {
+		t.Fatalf("expected interview status rescheduled, got %q", reviewResp.Interview.Status)
+	}
+	if reviewResp.Interview.CandidateState != "reschedule_accepted" {
+		t.Fatalf("expected candidate_state reschedule_accepted, got %q", reviewResp.Interview.CandidateState)
+	}
+	if reviewResp.Interview.StartsAt != "2026-04-09T11:00:00Z" || reviewResp.Interview.EndsAt != "2026-04-09T12:00:00Z" {
+		t.Fatalf("expected interview time to sync with accepted request, got starts_at=%s ends_at=%s", reviewResp.Interview.StartsAt, reviewResp.Interview.EndsAt)
+	}
+	if reviewResp.RescheduleRequest.Status != "accepted" {
+		t.Fatalf("expected reschedule request accepted, got %q", reviewResp.RescheduleRequest.Status)
+	}
+
+	records := fetchProcessActions(t, router, hrToken, created.ID)
+	if !containsString(records, "candidate.reschedule_requested") {
+		t.Fatalf("expected process record candidate.reschedule_requested, got %v", records)
+	}
+	if !containsString(records, "hr.reschedule_accepted") {
+		t.Fatalf("expected process record hr.reschedule_accepted, got %v", records)
+	}
+}
+
 func mustRouter(t *testing.T) http.Handler {
 	t.Helper()
 	cfg := config.Config{
@@ -549,6 +681,16 @@ func updateCandidateStatusLayer(t *testing.T, router http.Handler, token, candid
 
 func createInterview(t *testing.T, router http.Handler, token string, payload map[string]any) string {
 	t.Helper()
+	return createInterviewDetails(t, router, token, payload).ID
+}
+
+type createdInterview struct {
+	ID             string
+	CandidateToken string
+}
+
+func createInterviewDetails(t *testing.T, router http.Handler, token string, payload map[string]any) createdInterview {
+	t.Helper()
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -568,8 +710,9 @@ func createInterview(t *testing.T, router http.Handler, token string, payload ma
 	var resp struct {
 		NotificationsEnqueued int `json:"notifications_enqueued"`
 		Interview             struct {
-			ID     string `json:"id"`
-			Status string `json:"status"`
+			ID             string `json:"id"`
+			Status         string `json:"status"`
+			CandidateToken string `json:"candidate_token"`
 		} `json:"interview"`
 		Candidate struct {
 			StatusLayer string `json:"status_layer"`
@@ -590,7 +733,48 @@ func createInterview(t *testing.T, router http.Handler, token string, payload ma
 	if resp.NotificationsEnqueued == 0 {
 		t.Fatalf("expected notifications enqueued")
 	}
-	return resp.Interview.ID
+	if resp.Interview.CandidateToken == "" {
+		t.Fatalf("expected candidate token in response")
+	}
+	return createdInterview{
+		ID:             resp.Interview.ID,
+		CandidateToken: resp.Interview.CandidateToken,
+	}
+}
+
+func fetchProcessActions(t *testing.T, router http.Handler, token, interviewID string) []string {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/interviews/"+interviewID+"/process-records", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Items []struct {
+			Action string `json:"action"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal process records response: %v", err)
+	}
+	actions := make([]string, 0, len(resp.Items))
+	for _, item := range resp.Items {
+		actions = append(actions, item.Action)
+	}
+	return actions
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func assertCalendarCount(t *testing.T, body []byte, want int) {
