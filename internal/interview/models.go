@@ -9,10 +9,29 @@ import (
 type Status string
 
 const (
-	StatusScheduled   Status = "scheduled"
-	StatusRescheduled Status = "rescheduled"
-	StatusCancelled   Status = "cancelled"
-	StatusCompleted   Status = "completed"
+	StatusScheduled         Status = "scheduled"
+	StatusRescheduled       Status = "rescheduled"
+	StatusReschedulePending Status = "reschedule_pending"
+	StatusCancelled         Status = "cancelled"
+	StatusCompleted         Status = "completed"
+)
+
+type CandidateResponseStatus string
+
+const (
+	CandidateResponseAwaiting           CandidateResponseStatus = "awaiting_candidate"
+	CandidateResponseConfirmed          CandidateResponseStatus = "confirmed"
+	CandidateResponseReschedulePending  CandidateResponseStatus = "reschedule_pending"
+	CandidateResponseRescheduleAccepted CandidateResponseStatus = "reschedule_accepted"
+	CandidateResponseRescheduleRejected CandidateResponseStatus = "reschedule_rejected"
+)
+
+type RescheduleRequestStatus string
+
+const (
+	RescheduleRequestPending  RescheduleRequestStatus = "pending"
+	RescheduleRequestAccepted RescheduleRequestStatus = "accepted"
+	RescheduleRequestRejected RescheduleRequestStatus = "rejected"
 )
 
 type CalendarView string
@@ -24,18 +43,20 @@ const (
 )
 
 type Interview struct {
-	ID             string    `json:"id"`
-	CandidateID    string    `json:"candidate_id"`
-	InterviewerIDs []string  `json:"interviewer_ids"`
-	Round          string    `json:"round"`
-	Status         Status    `json:"status"`
-	StartsAt       time.Time `json:"starts_at"`
-	EndsAt         time.Time `json:"ends_at"`
-	ColorTag       string    `json:"color_tag"`
-	Note           string    `json:"note,omitempty"`
-	CreatedBy      string    `json:"created_by,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID             string                  `json:"id"`
+	CandidateID    string                  `json:"candidate_id"`
+	InterviewerIDs []string                `json:"interviewer_ids"`
+	CandidateToken string                  `json:"candidate_token,omitempty"`
+	Round          string                  `json:"round"`
+	Status         Status                  `json:"status"`
+	CandidateState CandidateResponseStatus `json:"candidate_state"`
+	StartsAt       time.Time               `json:"starts_at"`
+	EndsAt         time.Time               `json:"ends_at"`
+	ColorTag       string                  `json:"color_tag"`
+	Note           string                  `json:"note,omitempty"`
+	CreatedBy      string                  `json:"created_by,omitempty"`
+	CreatedAt      time.Time               `json:"created_at"`
+	UpdatedAt      time.Time               `json:"updated_at"`
 }
 
 type Conflict struct {
@@ -58,6 +79,30 @@ type NotificationEvent struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 
+type RescheduleRequest struct {
+	ID               string                  `json:"id"`
+	InterviewID      string                  `json:"interview_id"`
+	CandidateID      string                  `json:"candidate_id"`
+	ProposedStartsAt time.Time               `json:"proposed_starts_at"`
+	ProposedEndsAt   time.Time               `json:"proposed_ends_at"`
+	Note             string                  `json:"note,omitempty"`
+	Status           RescheduleRequestStatus `json:"status"`
+	ProcessedBy      string                  `json:"processed_by,omitempty"`
+	ProcessedNote    string                  `json:"processed_note,omitempty"`
+	CreatedAt        time.Time               `json:"created_at"`
+	UpdatedAt        time.Time               `json:"updated_at"`
+}
+
+type ProcessRecord struct {
+	ID          string    `json:"id"`
+	InterviewID string    `json:"interview_id"`
+	Action      string    `json:"action"`
+	ActorType   string    `json:"actor_type"`
+	ActorID     string    `json:"actor_id"`
+	Note        string    `json:"note,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 type CalendarResult struct {
 	View      CalendarView `json:"view"`
 	RangeFrom time.Time    `json:"range_from"`
@@ -71,6 +116,8 @@ func ParseStatus(raw string) (Status, error) {
 		return StatusScheduled, nil
 	case StatusRescheduled:
 		return StatusRescheduled, nil
+	case StatusReschedulePending:
+		return StatusReschedulePending, nil
 	case StatusCancelled:
 		return StatusCancelled, nil
 	case StatusCompleted:
@@ -101,6 +148,9 @@ func ComputeColorTag(round string, status Status) string {
 	if status == StatusCancelled {
 		return "status-cancelled"
 	}
+	if status == StatusReschedulePending {
+		return "status-reschedule-pending"
+	}
 	if status == StatusRescheduled {
 		return "status-rescheduled"
 	}
@@ -118,5 +168,5 @@ func ComputeColorTag(round string, status Status) string {
 }
 
 func IsActiveStatus(status Status) bool {
-	return status == StatusScheduled || status == StatusRescheduled
+	return status == StatusScheduled || status == StatusRescheduled || status == StatusReschedulePending
 }

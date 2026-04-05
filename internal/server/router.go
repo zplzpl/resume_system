@@ -51,6 +51,18 @@ type updateInterviewRequest struct {
 	Note           *string   `json:"note"`
 }
 
+type submitCandidateResponseRequest struct {
+	Action           string `json:"action"`
+	ProposedStartsAt string `json:"proposed_starts_at"`
+	ProposedEndsAt   string `json:"proposed_ends_at"`
+	Note             string `json:"note"`
+}
+
+type reviewRescheduleRequest struct {
+	Decision string `json:"decision"`
+	Note     string `json:"note"`
+}
+
 func NewRouter(cfg config.Config) (*gin.Engine, error) {
 	if cfg.SupabaseJWTSecret == "" {
 		return nil, errors.New("SUPABASE_JWT_SECRET is required")
@@ -81,6 +93,7 @@ func NewRouter(cfg config.Config) (*gin.Engine, error) {
 	})
 
 	v1 := r.Group("/api/v1")
+	v1.POST("/interview-responses/:token", h.submitCandidateResponse)
 	authGroup := v1.Group("/auth")
 	{
 		authGroup.POST("/login", h.login)
@@ -102,6 +115,8 @@ func NewRouter(cfg config.Config) (*gin.Engine, error) {
 		protected.POST("/interviews", auth.RequirePermission(rbac.ActionInterviewManage), h.createInterview)
 		protected.PATCH("/interviews/:id", auth.RequirePermission(rbac.ActionInterviewManage), h.updateInterview)
 		protected.GET("/interviews/calendar", auth.RequirePermission(rbac.ActionInterviewManage), h.getInterviewCalendar)
+		protected.POST("/interviews/:id/reschedule-review", auth.RequirePermission(rbac.ActionInterviewManage), h.reviewInterviewReschedule)
+		protected.GET("/interviews/:id/process-records", auth.RequirePermission(rbac.ActionInterviewManage), h.listInterviewProcessRecords)
 		protected.GET("/admin/users", auth.RequirePermission(rbac.ActionUserManage), h.listUsers)
 	}
 
@@ -499,6 +514,126 @@ func (h *handler) getInterviewCalendar(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"calendar": h.interviewSvc.Calendar(view, anchor),
+	})
+}
+
+func (h *handler) submitCandidateResponse(c *gin.Context) {
+	var req submitCandidateResponseRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "invalid request body"})
+		return
+	}
+
+	svcReq := interview.CandidateResponseRequest{
+		Action: req.Action,
+		Note:   req.Note,
+	}
+	if raw := strings.TrimSpace(req.ProposedStartsAt); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "proposed_starts_at must be RFC3339"})
+			return
+		}
+		svcReq.ProposedStartsAt = &parsed
+	}
+	if raw := strings.TrimSpace(req.ProposedEndsAt); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "proposed_ends_at must be RFC3339"})
+			return
+		}
+		svcReq.ProposedEndsAt = &parsed
+	}
+
+	result, err := h.interviewSvc.SubmitCandidateResponse(c.Param("token"), svcReq)
+	if err != nil {
+		switch {
+		case interview.IsCandidateTokenNotFound(err):
+			c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": err.Error()})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"submitted":              true,
+		"interview":              result.Interview,
+		"reschedule_request":     result.RescheduleRequest,
+		"notifications":          result.Notifications,
+		"notifications_enqueued": result.NotificationsEnqueued,
+		"process_records":        result.ProcessRecords,
+	})
+}
+
+func (h *handler) reviewInterviewReschedule(c *gin.Context) {
+	var req reviewRescheduleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "invalid request body"})
+		return
+	}
+
+	user := auth.MustUser(c)
+	processedBy := ""
+	if user != nil {
+		processedBy = user.ID
+	}
+
+	result, err := h.interviewSvc.ReviewReschedule(c.Param("id"), interview.ReviewRescheduleRequest{
+		Decision:    req.Decision,
+		ProcessedBy: processedBy,
+		Note:        req.Note,
+	})
+	if err != nil {
+		switch {
+		case interview.IsInterviewNotFound(err):
+			c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": err.Error()})
+		case interview.IsNoPendingRescheduleReview(err):
+			c.JSON(http.StatusConflict, gin.H{"code": "NO_PENDING_REVIEW", "message": err.Error()})
+		case interview.IsConflictError(err):
+			conflictErr := interview.ExtractConflictError(err)
+			c.JSON(http.StatusConflict, gin.H{
+				"code":      "SCHEDULE_CONFLICT",
+				"message":   err.Error(),
+				"conflicts": conflictErr.Conflicts,
+			})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		}
+		return
+	}
+
+	candidate, statusErr := h.resumeSvc.UpdateCandidateStatusLayer(result.Interview.CandidateID, string(resume.CandidateStatusInterview))
+	if statusErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": "STATUS_LINK_FAILED", "message": statusErr.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"reviewed":               true,
+		"interview":              result.Interview,
+		"reschedule_request":     result.RescheduleRequest,
+		"notifications":          result.Notifications,
+		"notifications_enqueued": result.NotificationsEnqueued,
+		"process_records":        result.ProcessRecords,
+		"candidate":              candidate,
+	})
+}
+
+func (h *handler) listInterviewProcessRecords(c *gin.Context) {
+	records, err := h.interviewSvc.ProcessRecords(c.Param("id"))
+	if err != nil {
+		switch {
+		case interview.IsInterviewNotFound(err):
+			c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": err.Error()})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"items": records,
 	})
 }
 

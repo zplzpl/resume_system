@@ -24,6 +24,9 @@ Supabase Auth + RBAC skeleton for resume system backend.
   - `POST /api/v1/interviews`
   - `PATCH /api/v1/interviews/:id`
   - `GET /api/v1/interviews/calendar?view=day|week|month&date=YYYY-MM-DD`
+  - `POST /api/v1/interview-responses/:token` (candidate confirm/reschedule via notification token)
+  - `POST /api/v1/interviews/:id/reschedule-review` (HR accepts/rejects candidate reschedule suggestion)
+  - `GET /api/v1/interviews/:id/process-records` (audit log for full schedule handling flow)
   - `GET /api/v1/admin/users`
 - Unified unauthorized response code (`UNAUTHORIZED`) for 401/403 cases
 - Resume upload/parse pipeline:
@@ -41,6 +44,10 @@ Supabase Auth + RBAC skeleton for resume system backend.
   - Detects candidate/interviewer time conflicts when creating/updating schedules
   - Enqueues notification events for create/update operations (in-app + email)
   - Links candidate flow status to `interview` when schedule is created or changed
+  - Candidate can confirm interview or submit reschedule proposal with proposed time range
+  - HR can review candidate proposal with accept/reject decision
+  - Interview status syncs through `reschedule_pending` -> `rescheduled`/`scheduled` after HR processing
+  - Process records are persisted for create/update/candidate response/HR review actions
 
 ## Environment Variables
 
