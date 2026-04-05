@@ -73,6 +73,24 @@ type generateInterviewQuestionRecommendationRequest struct {
 	JobDescription string `json:"job_description"`
 }
 
+type startInterviewTranscriptSessionRequest struct {
+	Provider string `json:"provider"`
+}
+
+type appendInterviewTranscriptRequest struct {
+	SessionID   string  `json:"session_id"`
+	SpeakerRole string  `json:"speaker_role"`
+	SpeakerID   string  `json:"speaker_id"`
+	Text        string  `json:"text"`
+	IsFinal     bool    `json:"is_final"`
+	StartedAt   *string `json:"started_at"`
+	EndedAt     *string `json:"ended_at"`
+}
+
+type markInterviewTranscriptInterruptedRequest struct {
+	Reason string `json:"reason"`
+}
+
 func NewRouter(cfg config.Config) (*gin.Engine, error) {
 	return newRouterWithAuthClient(cfg, auth.NewSupabaseClient(cfg.SupabaseURL, cfg.SupabaseAnonKey))
 }
@@ -131,6 +149,11 @@ func newRouterWithAuthClient(cfg config.Config, authClient auth.Client) (*gin.En
 		protected.POST("/interviews", auth.RequirePermission(rbac.ActionInterviewManage), h.createInterview)
 		protected.PATCH("/interviews/:id", auth.RequirePermission(rbac.ActionInterviewManage), h.updateInterview)
 		protected.GET("/interviews/calendar", auth.RequirePermission(rbac.ActionInterviewManage), h.getInterviewCalendar)
+		protected.POST("/interviews/:id/transcriptions/sessions", auth.RequirePermission(rbac.ActionInterviewManage), h.startInterviewTranscriptSession)
+		protected.POST("/interviews/:id/transcriptions", auth.RequirePermission(rbac.ActionInterviewManage), h.appendInterviewTranscript)
+		protected.GET("/interviews/:id/transcriptions", auth.RequirePermission(rbac.ActionInterviewManage), h.getInterviewTranscriptions)
+		protected.POST("/interviews/:id/transcriptions/sessions/:sessionID/interrupted", auth.RequirePermission(rbac.ActionInterviewManage), h.markInterviewTranscriptInterrupted)
+		protected.POST("/interviews/:id/transcriptions/sessions/:sessionID/reconnect", auth.RequirePermission(rbac.ActionInterviewManage), h.reconnectInterviewTranscriptSession)
 		protected.POST("/interviews/:id/evaluations", auth.RequirePermission(rbac.ActionInterviewManage), h.submitInterviewEvaluation)
 		protected.GET("/interviews/:id/evaluations", auth.RequirePermission(rbac.ActionInterviewManage), h.listInterviewEvaluations)
 		protected.POST("/interviews/:id/question-recommendations", auth.RequirePermission(rbac.ActionInterviewManage), h.generateInterviewQuestionRecommendation)
@@ -591,6 +614,168 @@ func (h *handler) getInterviewCalendar(c *gin.Context) {
 	})
 }
 
+func (h *handler) startInterviewTranscriptSession(c *gin.Context) {
+	var req startInterviewTranscriptSessionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "invalid request body"})
+		return
+	}
+
+	session, err := h.interviewSvc.StartTranscriptSession(c.Param("id"), interview.StartTranscriptSessionRequest{
+		Provider: req.Provider,
+	})
+	if err != nil {
+		if interview.IsInterviewNotFound(err) {
+			c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"started": true,
+		"session": session,
+	})
+}
+
+func (h *handler) appendInterviewTranscript(c *gin.Context) {
+	var req appendInterviewTranscriptRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "invalid request body"})
+		return
+	}
+
+	startedAt, err := parseBodyOptionalRFC3339(req.StartedAt)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "started_at must be RFC3339"})
+		return
+	}
+	endedAt, err := parseBodyOptionalRFC3339(req.EndedAt)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "ended_at must be RFC3339"})
+		return
+	}
+
+	segment, session, err := h.interviewSvc.AppendTranscript(c.Param("id"), interview.AppendTranscriptRequest{
+		SessionID:   req.SessionID,
+		SpeakerRole: req.SpeakerRole,
+		SpeakerID:   req.SpeakerID,
+		Text:        req.Text,
+		IsFinal:     req.IsFinal,
+		StartedAt:   startedAt,
+		EndedAt:     endedAt,
+	})
+	if err != nil {
+		switch {
+		case interview.IsInterviewNotFound(err), errors.Is(err, interview.ErrTranscriptionSessionNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": err.Error()})
+		case errors.Is(err, interview.ErrTranscriptionSessionInactive):
+			c.JSON(http.StatusConflict, gin.H{
+				"code":               "TRANSCRIPTION_INTERRUPTED",
+				"message":            err.Error(),
+				"reconnect_required": true,
+			})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"accepted": true,
+		"segment":  segment,
+		"session":  session,
+	})
+}
+
+func (h *handler) getInterviewTranscriptions(c *gin.Context) {
+	sinceSeq := int64(0)
+	if rawSince := strings.TrimSpace(c.Query("since_seq")); rawSince != "" {
+		parsed, err := strconv.ParseInt(rawSince, 10, 64)
+		if err != nil || parsed < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "since_seq must be a non-negative integer"})
+			return
+		}
+		sinceSeq = parsed
+	}
+
+	limit := 50
+	if rawLimit := strings.TrimSpace(c.Query("limit")); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "limit must be a positive integer"})
+			return
+		}
+		limit = parsed
+	}
+
+	stream, err := h.interviewSvc.StreamTranscripts(c.Param("id"), interview.StreamTranscriptsRequest{
+		SessionID:     c.Query("session_id"),
+		SinceSequence: sinceSeq,
+		Limit:         limit,
+	})
+	if err != nil {
+		switch {
+		case interview.IsInterviewNotFound(err), errors.Is(err, interview.ErrTranscriptionSessionNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": err.Error()})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		}
+		return
+	}
+
+	status := http.StatusOK
+	if stream.ReconnectRequired {
+		status = http.StatusConflict
+	}
+	c.JSON(status, gin.H{
+		"stream": stream,
+	})
+}
+
+func (h *handler) markInterviewTranscriptInterrupted(c *gin.Context) {
+	var req markInterviewTranscriptInterruptedRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "invalid request body"})
+		return
+	}
+
+	session, err := h.interviewSvc.MarkTranscriptSessionInterrupted(c.Param("id"), c.Param("sessionID"), req.Reason)
+	if err != nil {
+		switch {
+		case interview.IsInterviewNotFound(err), errors.Is(err, interview.ErrTranscriptionSessionNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": err.Error()})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"updated": true,
+		"session": session,
+	})
+}
+
+func (h *handler) reconnectInterviewTranscriptSession(c *gin.Context) {
+	session, err := h.interviewSvc.ReconnectTranscriptSession(c.Param("id"), c.Param("sessionID"))
+	if err != nil {
+		switch {
+		case interview.IsInterviewNotFound(err), errors.Is(err, interview.ErrTranscriptionSessionNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": err.Error()})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"reconnected": true,
+		"session":     session,
+	})
+}
+
 func (h *handler) submitInterviewEvaluation(c *gin.Context) {
 	user := auth.MustUser(c)
 	if user == nil {
@@ -918,6 +1103,13 @@ func parseOptionalRFC3339(raw string) (*time.Time, error) {
 	}
 	parsed = parsed.UTC()
 	return &parsed, nil
+}
+
+func parseBodyOptionalRFC3339(raw *string) (*time.Time, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	return parseOptionalRFC3339(*raw)
 }
 
 func resolveLoginOperatorID(session *auth.Session, fallback string) string {

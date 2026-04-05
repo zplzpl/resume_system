@@ -25,6 +25,11 @@ Supabase Auth + RBAC skeleton for resume system backend.
   - `POST /api/v1/interviews`
   - `PATCH /api/v1/interviews/:id`
   - `GET /api/v1/interviews/calendar?view=day|week|month&date=YYYY-MM-DD`
+  - `POST /api/v1/interviews/:id/transcriptions/sessions`
+  - `POST /api/v1/interviews/:id/transcriptions`
+  - `GET /api/v1/interviews/:id/transcriptions?session_id=<id>&since_seq=<n>`
+  - `POST /api/v1/interviews/:id/transcriptions/sessions/:sessionID/interrupted`
+  - `POST /api/v1/interviews/:id/transcriptions/sessions/:sessionID/reconnect`
   - `POST /api/v1/interviews/:id/evaluations`
   - `GET /api/v1/interviews/:id/evaluations`
   - `POST /api/v1/interviews/:id/question-recommendations`
@@ -50,6 +55,11 @@ Supabase Auth + RBAC skeleton for resume system backend.
   - Detects candidate/interviewer time conflicts when creating/updating schedules
   - Enqueues notification events for create/update operations (in-app + email)
   - Links candidate flow status to `interview` when schedule is created or changed
+- Real-time interview transcription:
+  - Supports interview-scoped transcription sessions to continuously append transcript segments
+  - Persists transcript segments with ordered sequence cursor for incremental reads (`since_seq`)
+  - Supports explicit speaker labels (`interviewer` / `candidate`) per transcript segment
+  - Provides interruption status and reconnect endpoint for stream recovery/error prompting
 - Structured interview evaluation:
   - Uses fixed capability template (`technical_depth` / `problem_solving` / `communication` / `collaboration`)
   - Validates score range (1-5) and conclusion enum (`strong_hire` / `hire` / `hold` / `no_hire`)

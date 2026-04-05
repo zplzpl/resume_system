@@ -441,6 +441,200 @@ func TestInterviewSchedulingConflictAndCalendarViews(t *testing.T) {
 	assertCalendarCount(t, monthW.Body.Bytes(), 2)
 }
 
+func TestInterviewRealtimeTranscriptionFlowWithReconnect(t *testing.T) {
+	router := mustRouter(t)
+	token := signToken(t, "user_hr", "hr")
+
+	candidateID := uploadResumeAndGetCandidateID(t, router, token, "transcript_resume.pdf", "Name: Transcript Candidate\nEmail: transcript@example.com\nSkills: Go\n")
+	interviewID := createInterview(t, router, token, map[string]any{
+		"candidate_id":    candidateID,
+		"interviewer_ids": []string{"iv_tr_1"},
+		"starts_at":       "2026-04-16T09:00:00Z",
+		"ends_at":         "2026-04-16T10:00:00Z",
+		"round":           "round-1",
+	})
+
+	startBody, _ := json.Marshal(map[string]any{"provider": "unit_test_asr"})
+	startReq := httptest.NewRequest(http.MethodPost, "/api/v1/interviews/"+interviewID+"/transcriptions/sessions", bytes.NewReader(startBody))
+	startReq.Header.Set("Authorization", "Bearer "+token)
+	startReq.Header.Set("Content-Type", "application/json")
+	startW := httptest.NewRecorder()
+	router.ServeHTTP(startW, startReq)
+	if startW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, startW.Code, startW.Body.String())
+	}
+
+	var startResp struct {
+		Started bool `json:"started"`
+		Session struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal(startW.Body.Bytes(), &startResp); err != nil {
+		t.Fatalf("unmarshal start response: %v", err)
+	}
+	if !startResp.Started || startResp.Session.ID == "" {
+		t.Fatalf("expected started session, got %+v", startResp)
+	}
+	if startResp.Session.Status != "active" {
+		t.Fatalf("expected active session, got %q", startResp.Session.Status)
+	}
+
+	appendPayloads := []map[string]any{
+		{
+			"session_id":   startResp.Session.ID,
+			"speaker_role": "interviewer",
+			"speaker_id":   "iv_tr_1",
+			"text":         "Please introduce your most recent project.",
+			"is_final":     true,
+		},
+		{
+			"session_id":   startResp.Session.ID,
+			"speaker_role": "candidate",
+			"speaker_id":   candidateID,
+			"text":         "I recently led a real-time log aggregation system.",
+			"is_final":     true,
+		},
+	}
+	for _, payload := range appendPayloads {
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/interviews/"+interviewID+"/transcriptions", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, w.Code, w.Body.String())
+		}
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/interviews/"+interviewID+"/transcriptions?session_id="+startResp.Session.ID+"&since_seq=0", nil)
+	getReq.Header.Set("Authorization", "Bearer "+token)
+	getW := httptest.NewRecorder()
+	router.ServeHTTP(getW, getReq)
+	if getW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, getW.Code, getW.Body.String())
+	}
+
+	var getResp struct {
+		Stream struct {
+			NextSequence int64 `json:"next_sequence"`
+			Segments     []struct {
+				Sequence    int64  `json:"sequence"`
+				SpeakerRole string `json:"speaker_role"`
+				Text        string `json:"text"`
+			} `json:"segments"`
+		} `json:"stream"`
+	}
+	if err := json.Unmarshal(getW.Body.Bytes(), &getResp); err != nil {
+		t.Fatalf("unmarshal get transcription response: %v", err)
+	}
+	if len(getResp.Stream.Segments) != 2 {
+		t.Fatalf("expected 2 transcript segments, got %d", len(getResp.Stream.Segments))
+	}
+	if getResp.Stream.Segments[0].SpeakerRole != "interviewer" || getResp.Stream.Segments[1].SpeakerRole != "candidate" {
+		t.Fatalf("expected interviewer/candidate speaker roles, got %+v", getResp.Stream.Segments)
+	}
+	if getResp.Stream.NextSequence != 2 {
+		t.Fatalf("expected next_sequence=2, got %d", getResp.Stream.NextSequence)
+	}
+
+	interruptBody, _ := json.Marshal(map[string]any{"reason": "asr websocket disconnected"})
+	interruptReq := httptest.NewRequest(http.MethodPost, "/api/v1/interviews/"+interviewID+"/transcriptions/sessions/"+startResp.Session.ID+"/interrupted", bytes.NewReader(interruptBody))
+	interruptReq.Header.Set("Authorization", "Bearer "+token)
+	interruptReq.Header.Set("Content-Type", "application/json")
+	interruptW := httptest.NewRecorder()
+	router.ServeHTTP(interruptW, interruptReq)
+	if interruptW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, interruptW.Code, interruptW.Body.String())
+	}
+
+	interruptedReadReq := httptest.NewRequest(http.MethodGet, "/api/v1/interviews/"+interviewID+"/transcriptions?session_id="+startResp.Session.ID+"&since_seq=2", nil)
+	interruptedReadReq.Header.Set("Authorization", "Bearer "+token)
+	interruptedReadW := httptest.NewRecorder()
+	router.ServeHTTP(interruptedReadW, interruptedReadReq)
+	if interruptedReadW.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusConflict, interruptedReadW.Code, interruptedReadW.Body.String())
+	}
+	if !strings.Contains(interruptedReadW.Body.String(), "reconnect_required") {
+		t.Fatalf("expected reconnect_required in interrupted response, got %s", interruptedReadW.Body.String())
+	}
+
+	appendWhileInterruptedBody, _ := json.Marshal(map[string]any{
+		"session_id":   startResp.Session.ID,
+		"speaker_role": "candidate",
+		"text":         "this append should fail",
+		"is_final":     true,
+	})
+	appendWhileInterruptedReq := httptest.NewRequest(http.MethodPost, "/api/v1/interviews/"+interviewID+"/transcriptions", bytes.NewReader(appendWhileInterruptedBody))
+	appendWhileInterruptedReq.Header.Set("Authorization", "Bearer "+token)
+	appendWhileInterruptedReq.Header.Set("Content-Type", "application/json")
+	appendWhileInterruptedW := httptest.NewRecorder()
+	router.ServeHTTP(appendWhileInterruptedW, appendWhileInterruptedReq)
+	if appendWhileInterruptedW.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusConflict, appendWhileInterruptedW.Code, appendWhileInterruptedW.Body.String())
+	}
+
+	reconnectReq := httptest.NewRequest(http.MethodPost, "/api/v1/interviews/"+interviewID+"/transcriptions/sessions/"+startResp.Session.ID+"/reconnect", nil)
+	reconnectReq.Header.Set("Authorization", "Bearer "+token)
+	reconnectW := httptest.NewRecorder()
+	router.ServeHTTP(reconnectW, reconnectReq)
+	if reconnectW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, reconnectW.Code, reconnectW.Body.String())
+	}
+
+	appendAfterReconnectBody, _ := json.Marshal(map[string]any{
+		"session_id":   startResp.Session.ID,
+		"speaker_role": "candidate",
+		"speaker_id":   candidateID,
+		"text":         "I owned stream processing and alert noise reduction.",
+		"is_final":     true,
+	})
+	appendAfterReconnectReq := httptest.NewRequest(http.MethodPost, "/api/v1/interviews/"+interviewID+"/transcriptions", bytes.NewReader(appendAfterReconnectBody))
+	appendAfterReconnectReq.Header.Set("Authorization", "Bearer "+token)
+	appendAfterReconnectReq.Header.Set("Content-Type", "application/json")
+	appendAfterReconnectW := httptest.NewRecorder()
+	router.ServeHTTP(appendAfterReconnectW, appendAfterReconnectReq)
+	if appendAfterReconnectW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, appendAfterReconnectW.Code, appendAfterReconnectW.Body.String())
+	}
+
+	incrementalReq := httptest.NewRequest(http.MethodGet, "/api/v1/interviews/"+interviewID+"/transcriptions?session_id="+startResp.Session.ID+"&since_seq=2", nil)
+	incrementalReq.Header.Set("Authorization", "Bearer "+token)
+	incrementalW := httptest.NewRecorder()
+	router.ServeHTTP(incrementalW, incrementalReq)
+	if incrementalW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, incrementalW.Code, incrementalW.Body.String())
+	}
+
+	var incrementalResp struct {
+		Stream struct {
+			ReconnectRequired bool  `json:"reconnect_required"`
+			NextSequence      int64 `json:"next_sequence"`
+			Segments          []struct {
+				Sequence    int64  `json:"sequence"`
+				SpeakerRole string `json:"speaker_role"`
+			} `json:"segments"`
+		} `json:"stream"`
+	}
+	if err := json.Unmarshal(incrementalW.Body.Bytes(), &incrementalResp); err != nil {
+		t.Fatalf("unmarshal incremental response: %v", err)
+	}
+	if incrementalResp.Stream.ReconnectRequired {
+		t.Fatalf("expected reconnect_required=false after reconnect")
+	}
+	if len(incrementalResp.Stream.Segments) != 1 {
+		t.Fatalf("expected 1 new segment after since_seq=2, got %d", len(incrementalResp.Stream.Segments))
+	}
+	if incrementalResp.Stream.Segments[0].Sequence != 3 {
+		t.Fatalf("expected sequence 3, got %d", incrementalResp.Stream.Segments[0].Sequence)
+	}
+	if incrementalResp.Stream.Segments[0].SpeakerRole != "candidate" {
+		t.Fatalf("expected candidate speaker role after reconnect, got %q", incrementalResp.Stream.Segments[0].SpeakerRole)
+	}
+}
+
 func TestInterviewUpdateTriggersNotificationAndStatusLink(t *testing.T) {
 	router := mustRouter(t)
 	token := signToken(t, "user_hr", "hr")
