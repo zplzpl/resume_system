@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/zplzpl/resume_system/internal/analytics"
 	"github.com/zplzpl/resume_system/internal/audit"
 	"github.com/zplzpl/resume_system/internal/auth"
 	"github.com/zplzpl/resume_system/internal/config"
@@ -22,6 +23,7 @@ import (
 type handler struct {
 	authClient   auth.Client
 	auditSvc     *audit.Service
+	analyticsSvc *analytics.Service
 	resumeSvc    *resume.Service
 	interviewSvc *interview.Service
 	reportSvc    *report.Service
@@ -108,6 +110,7 @@ func newRouterWithAuthClient(cfg config.Config, authClient auth.Client) (*gin.En
 	h := &handler{
 		authClient:   authClient,
 		auditSvc:     audit.NewService(audit.NewMemoryRepository()),
+		analyticsSvc: analytics.NewService(),
 		resumeSvc:    resume.NewService(resume.NewMemoryRepository(), storage, resume.NewHeuristicParser()),
 		interviewSvc: interview.NewService(interview.NewMemoryRepository()),
 		reportSvc:    report.NewService(nil),
@@ -161,6 +164,8 @@ func newRouterWithAuthClient(cfg config.Config, authClient auth.Client) (*gin.En
 		protected.GET("/candidates/:id/evaluations/latest", auth.RequirePermission(rbac.ActionInterviewManage), h.getCandidateLatestEvaluations)
 		protected.POST("/candidates/:id/interview-report", auth.RequirePermission(rbac.ActionInterviewManage), h.generateInterviewReport)
 		protected.GET("/interview-reports/:id/export", auth.RequirePermission(rbac.ActionInterviewManage), h.exportInterviewReport)
+		protected.GET("/analytics/recruiting-dashboard", auth.RequirePermission(rbac.ActionCandidateRead), h.recruitingDashboard)
+		protected.GET("/analytics/recruiting-dashboard/export.csv", auth.RequirePermission(rbac.ActionCandidateRead), h.exportRecruitingDashboardCSV)
 		protected.GET("/admin/users", auth.RequirePermission(rbac.ActionUserManage), h.listUsers)
 		protected.GET("/audit-logs", auth.RequirePermission(rbac.ActionAuditRead), h.listAuditLogs)
 	}
@@ -1040,6 +1045,32 @@ func (h *handler) exportInterviewReport(c *gin.Context) {
 	c.Header("Content-Disposition", `attachment; filename="`+fileName+`"`)
 	c.Status(http.StatusOK)
 	_, _ = c.Writer.Write(content)
+}
+
+func (h *handler) recruitingDashboard(c *gin.Context) {
+	c.JSON(http.StatusOK, h.buildRecruitingDashboard())
+}
+
+func (h *handler) exportRecruitingDashboardCSV(c *gin.Context) {
+	content, err := h.analyticsSvc.BuildDashboardCSV(h.buildRecruitingDashboard())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": "DASHBOARD_EXPORT_FAILED", "message": err.Error()})
+		return
+	}
+
+	c.Header("Content-Disposition", `attachment; filename="recruiting_dashboard.csv"`)
+	c.Data(http.StatusOK, "text/csv; charset=utf-8", content)
+}
+
+func (h *handler) buildRecruitingDashboard() analytics.Dashboard {
+	candidates := h.resumeSvc.ListCandidates()
+	interviews := h.interviewSvc.ListInterviews()
+	evaluations := make([]interview.Evaluation, 0, len(candidates))
+	for _, candidate := range candidates {
+		view := h.interviewSvc.BuildCandidateLatestEvaluationsView(candidate.ID)
+		evaluations = append(evaluations, view.LatestEvaluations...)
+	}
+	return h.analyticsSvc.BuildDashboard(candidates, interviews, evaluations)
 }
 
 func (h *handler) listAuditLogs(c *gin.Context) {

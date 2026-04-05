@@ -37,6 +37,8 @@ Supabase Auth + RBAC skeleton for resume system backend.
   - `GET /api/v1/candidates/:id/evaluations/latest`
   - `POST /api/v1/candidates/:id/interview-report`
   - `GET /api/v1/interview-reports/:id/export?format=json|markdown`
+  - `GET /api/v1/analytics/recruiting-dashboard`
+  - `GET /api/v1/analytics/recruiting-dashboard/export.csv`
   - `GET /api/v1/audit-logs`
   - `GET /api/v1/admin/users`
 - Unified unauthorized response code (`UNAUTHORIZED`) for 401/403 cases
@@ -70,10 +72,24 @@ Supabase Auth + RBAC skeleton for resume system backend.
   - Deterministic report ID and stable score ordering on repeated generation
   - Includes candidate information, score details, interviewer comments, and hiring recommendation
   - Supports JSON and Markdown export formats with explicit failure messages
+- Recruiting funnel and efficiency dashboard:
+  - Returns stage candidate counts and stage-to-stage conversion rates for `new/screening/interview/offer/hired`
+  - Returns interviewer workload (feedback count) and average feedback duration
+  - Supports CSV export for downstream BI/reporting
+  - Includes explicit metric definitions (formula/unit/aggregation)
 - Audit logging:
   - Automatically records key operations (`auth.login`, `auth.logout`, `resume.delete`, `interview.evaluation.submit`, `interview.evaluation.modify`)
   - Includes operator, operation time, object type, object id, and operation metadata
   - Supports filtered query by action/operator/object/time window via `GET /api/v1/audit-logs`
+
+## Recruiting Dashboard Metric Definitions
+
+| Metric ID | Definition | Formula | Unit | Aggregation |
+| --- | --- | --- | --- | --- |
+| `stage_candidate_count` | Current candidates in each stage | `count(candidates where status_layer = stage)` | 人 | 按阶段 |
+| `stage_conversion_rate` | Ratio of current stage to previous stage | `stage_count(current_stage) / stage_count(previous_stage)` | 比例 | 按阶段 |
+| `interviewer_workload` | Feedback entries submitted by each interviewer | `count(evaluations where interviewer_id = x)` | 条反馈 | 按面试官 |
+| `feedback_duration_hours` | Elapsed time from interview end to feedback submission | `evaluation.submitted_at - interview.ends_at` | 小时 | 平均值 |
 
 ## Environment Variables
 

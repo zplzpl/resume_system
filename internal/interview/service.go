@@ -270,6 +270,10 @@ func (s *Service) GetInterview(id string) (Interview, error) {
 	return item, nil
 }
 
+func (s *Service) ListInterviews() []Interview {
+	return s.repo.ListInterviews()
+}
+
 func buildNotificationEvents(item Interview, eventType string) []NotificationEvent {
 	events := make([]NotificationEvent, 0, (1+len(item.InterviewerIDs))*2)
 	channels := []string{"in_app", "email"}
