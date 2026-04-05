@@ -8,6 +8,7 @@ import (
 
 var (
 	ErrCandidateNotFound  = errors.New("candidate not found")
+	ErrResumeNotFound     = errors.New("resume not found")
 	ErrInvalidStatusLayer = errors.New("invalid status layer")
 )
 

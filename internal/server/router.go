@@ -4,10 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/zplzpl/resume_system/internal/audit"
 	"github.com/zplzpl/resume_system/internal/auth"
 	"github.com/zplzpl/resume_system/internal/config"
 	"github.com/zplzpl/resume_system/internal/httpx"
@@ -19,6 +21,7 @@ import (
 
 type handler struct {
 	authClient   auth.Client
+	auditSvc     *audit.Service
 	resumeSvc    *resume.Service
 	interviewSvc *interview.Service
 	reportSvc    *report.Service
@@ -71,6 +74,10 @@ type generateInterviewQuestionRecommendationRequest struct {
 }
 
 func NewRouter(cfg config.Config) (*gin.Engine, error) {
+	return newRouterWithAuthClient(cfg, auth.NewSupabaseClient(cfg.SupabaseURL, cfg.SupabaseAnonKey))
+}
+
+func newRouterWithAuthClient(cfg config.Config, authClient auth.Client) (*gin.Engine, error) {
 	if cfg.SupabaseJWTSecret == "" {
 		return nil, errors.New("SUPABASE_JWT_SECRET is required")
 	}
@@ -81,7 +88,8 @@ func NewRouter(cfg config.Config) (*gin.Engine, error) {
 	}
 
 	h := &handler{
-		authClient:   auth.NewSupabaseClient(cfg.SupabaseURL, cfg.SupabaseAnonKey),
+		authClient:   authClient,
+		auditSvc:     audit.NewService(audit.NewMemoryRepository()),
 		resumeSvc:    resume.NewService(resume.NewMemoryRepository(), storage, resume.NewHeuristicParser()),
 		interviewSvc: interview.NewService(interview.NewMemoryRepository()),
 		reportSvc:    report.NewService(nil),
@@ -118,6 +126,7 @@ func NewRouter(cfg config.Config) (*gin.Engine, error) {
 		protected.POST("/resumes/upload", auth.RequirePermission(rbac.ActionCandidateWrite), h.uploadResume)
 		protected.POST("/resumes/upload/batch", auth.RequirePermission(rbac.ActionCandidateWrite), h.uploadResumeBatch)
 		protected.GET("/resumes/:id", auth.RequirePermission(rbac.ActionCandidateRead), h.getResume)
+		protected.DELETE("/resumes/:id", auth.RequirePermission(rbac.ActionCandidateWrite), h.deleteResume)
 		protected.POST("/resumes/:id/retry", auth.RequirePermission(rbac.ActionCandidateWrite), h.retryResume)
 		protected.POST("/interviews", auth.RequirePermission(rbac.ActionInterviewManage), h.createInterview)
 		protected.PATCH("/interviews/:id", auth.RequirePermission(rbac.ActionInterviewManage), h.updateInterview)
@@ -130,6 +139,7 @@ func NewRouter(cfg config.Config) (*gin.Engine, error) {
 		protected.POST("/candidates/:id/interview-report", auth.RequirePermission(rbac.ActionInterviewManage), h.generateInterviewReport)
 		protected.GET("/interview-reports/:id/export", auth.RequirePermission(rbac.ActionInterviewManage), h.exportInterviewReport)
 		protected.GET("/admin/users", auth.RequirePermission(rbac.ActionUserManage), h.listUsers)
+		protected.GET("/audit-logs", auth.RequirePermission(rbac.ActionAuditRead), h.listAuditLogs)
 	}
 
 	return r, nil
@@ -146,6 +156,14 @@ func (h *handler) login(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"code": "AUTH_LOGIN_FAILED", "message": err.Error()})
 		return
 	}
+	h.auditSvc.Record(audit.RecordInput{
+		ActionType: audit.ActionAuthLogin,
+		OperatorID: resolveLoginOperatorID(session, req.Email),
+		ObjectType: "session",
+		Metadata: map[string]string{
+			"auth_method": "password",
+		},
+	})
 	c.JSON(http.StatusOK, session)
 }
 
@@ -174,6 +192,15 @@ func (h *handler) logout(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"code": "AUTH_LOGOUT_FAILED", "message": err.Error()})
 		return
 	}
+	operatorID := ""
+	if user := auth.MustUser(c); user != nil {
+		operatorID = user.ID
+	}
+	h.auditSvc.Record(audit.RecordInput{
+		ActionType: audit.ActionAuthLogout,
+		OperatorID: operatorID,
+		ObjectType: "session",
+	})
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -354,6 +381,41 @@ func (h *handler) getResume(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, result)
+}
+
+func (h *handler) deleteResume(c *gin.Context) {
+	user := auth.MustUser(c)
+	if user == nil {
+		httpx.AbortUnauthorized(c, http.StatusUnauthorized, "missing auth context")
+		return
+	}
+
+	record, err := h.resumeSvc.DeleteResume(c.Param("id"))
+	if err != nil {
+		switch {
+		case resume.IsResumeNotFound(err):
+			c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"code": "DELETE_FAILED", "message": err.Error()})
+		}
+		return
+	}
+
+	h.auditSvc.Record(audit.RecordInput{
+		ActionType: audit.ActionResumeDelete,
+		OperatorID: user.ID,
+		ObjectType: "resume",
+		ObjectID:   record.ID,
+		Metadata: map[string]string{
+			"candidate_id": record.CandidateID,
+			"file_name":    record.FileName,
+		},
+	})
+
+	c.JSON(http.StatusOK, gin.H{
+		"deleted":   true,
+		"resume_id": record.ID,
+	})
 }
 
 func (h *handler) retryResume(c *gin.Context) {
@@ -568,6 +630,24 @@ func (h *handler) submitInterviewEvaluation(c *gin.Context) {
 		return
 	}
 
+	actionType := audit.ActionInterviewEvaluationSubmit
+	if result.Version > 1 {
+		actionType = audit.ActionInterviewEvaluationModify
+	}
+	h.auditSvc.Record(audit.RecordInput{
+		ActionType: actionType,
+		OperatorID: user.ID,
+		ObjectType: "interview_evaluation",
+		ObjectID:   result.ID,
+		Metadata: map[string]string{
+			"interview_id":   result.InterviewID,
+			"candidate_id":   result.CandidateID,
+			"interviewer_id": result.InterviewerID,
+			"conclusion":     string(result.Conclusion),
+			"version":        strconv.Itoa(result.Version),
+		},
+	})
+
 	c.JSON(http.StatusOK, gin.H{
 		"submitted":  true,
 		"evaluation": result,
@@ -777,6 +857,41 @@ func (h *handler) exportInterviewReport(c *gin.Context) {
 	_, _ = c.Writer.Write(content)
 }
 
+func (h *handler) listAuditLogs(c *gin.Context) {
+	limit := 100
+	if rawLimit := strings.TrimSpace(c.Query("limit")); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "limit must be a positive integer"})
+			return
+		}
+		limit = parsed
+	}
+
+	from, err := parseOptionalRFC3339(c.Query("from"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "from must be RFC3339"})
+		return
+	}
+	to, err := parseOptionalRFC3339(c.Query("to"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "to must be RFC3339"})
+		return
+	}
+
+	items := h.auditSvc.Query(audit.QueryFilter{
+		ActionType: strings.TrimSpace(c.Query("action_type")),
+		OperatorID: strings.TrimSpace(c.Query("operator_id")),
+		ObjectType: strings.TrimSpace(c.Query("object_type")),
+		ObjectID:   strings.TrimSpace(c.Query("object_id")),
+		From:       from,
+		To:         to,
+		Limit:      limit,
+	})
+	c.JSON(http.StatusOK, gin.H{
+		"items": items,
+	})
+}
 func parseCalendarAnchor(raw string) (time.Time, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -790,6 +905,33 @@ func parseCalendarAnchor(raw string) (time.Time, error) {
 		return t.UTC(), nil
 	}
 	return time.Time{}, fmt.Errorf("date must be YYYY-MM-DD or RFC3339")
+}
+
+func parseOptionalRFC3339(raw string) (*time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return nil, err
+	}
+	parsed = parsed.UTC()
+	return &parsed, nil
+}
+
+func resolveLoginOperatorID(session *auth.Session, fallback string) string {
+	if session != nil {
+		if userMap, ok := session.User.(map[string]any); ok {
+			if id, ok := userMap["id"].(string); ok && strings.TrimSpace(id) != "" {
+				return strings.TrimSpace(id)
+			}
+			if email, ok := userMap["email"].(string); ok && strings.TrimSpace(email) != "" {
+				return strings.TrimSpace(email)
+			}
+		}
+	}
+	return strings.TrimSpace(fallback)
 }
 
 func (h *handler) listUsers(c *gin.Context) {

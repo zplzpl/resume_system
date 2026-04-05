@@ -3,6 +3,7 @@ package resume
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -66,6 +67,17 @@ func (s *LocalStorage) Save(fileName string, r io.Reader) (StoredFile, error) {
 		Hash:        hex.EncodeToString(h.Sum(nil)),
 		Size:        n,
 	}, nil
+}
+
+func (s *LocalStorage) Delete(storagePath string) error {
+	storagePath = strings.TrimSpace(storagePath)
+	if storagePath == "" {
+		return nil
+	}
+	if err := os.Remove(storagePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("delete storage file: %w", err)
+	}
+	return nil
 }
 
 var unsafeFileChars = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
