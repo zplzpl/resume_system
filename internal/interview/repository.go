@@ -93,12 +93,36 @@ func (r *MemoryRepository) EnqueueNotifications(events []NotificationEvent) []No
 	out := make([]NotificationEvent, 0, len(events))
 	for _, event := range events {
 		r.nextEvent++
+		now := time.Now().UTC()
 		event.ID = fmt.Sprintf("evt_%06d", r.nextEvent)
-		event.CreatedAt = time.Now().UTC()
-		r.notificationLog = append(r.notificationLog, event)
-		out = append(out, event)
+		if event.TraceID == "" {
+			event.TraceID = fmt.Sprintf("trace_%s", event.ID)
+		}
+		if event.Status == "" {
+			event.Status = NotificationStatusPending
+		}
+		event.CreatedAt = now
+		event.UpdatedAt = now
+		r.notificationLog = append(r.notificationLog, cloneNotificationEvent(event))
+		out = append(out, cloneNotificationEvent(event))
 	}
 	return out
+}
+
+func (r *MemoryRepository) UpdateNotification(event NotificationEvent) NotificationEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for idx := range r.notificationLog {
+		if r.notificationLog[idx].ID != event.ID {
+			continue
+		}
+		r.notificationLog[idx] = cloneNotificationEvent(event)
+		return cloneNotificationEvent(r.notificationLog[idx])
+	}
+
+	r.notificationLog = append(r.notificationLog, cloneNotificationEvent(event))
+	return cloneNotificationEvent(event)
 }
 
 func (r *MemoryRepository) AddEvaluation(item Evaluation) Evaluation {
@@ -315,5 +339,22 @@ func cloneTranscriptSegment(in TranscriptSegment) TranscriptSegment {
 	out := in
 	out.StartedAt = cloneTimePtr(in.StartedAt)
 	out.EndedAt = cloneTimePtr(in.EndedAt)
+	return out
+}
+
+func cloneNotificationEvent(in NotificationEvent) NotificationEvent {
+	out := in
+	if in.TemplateVariables != nil {
+		out.TemplateVariables = make(map[string]string, len(in.TemplateVariables))
+		for key, value := range in.TemplateVariables {
+			out.TemplateVariables[key] = value
+		}
+	}
+	out.Attempts = append([]NotificationDeliveryAttempt(nil), in.Attempts...)
+	if in.Alert != nil {
+		alert := *in.Alert
+		out.Alert = &alert
+	}
+	out.SentAt = cloneTimePtr(in.SentAt)
 	return out
 }

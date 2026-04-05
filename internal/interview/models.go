@@ -50,13 +50,57 @@ type Conflict struct {
 }
 
 type NotificationEvent struct {
-	ID            string    `json:"id"`
-	InterviewID   string    `json:"interview_id"`
-	RecipientID   string    `json:"recipient_id"`
-	RecipientType string    `json:"recipient_type"`
-	Channel       string    `json:"channel"`
-	EventType     string    `json:"event_type"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID                string                        `json:"id"`
+	InterviewID       string                        `json:"interview_id"`
+	RecipientID       string                        `json:"recipient_id"`
+	RecipientType     string                        `json:"recipient_type"`
+	Channel           NotificationChannel           `json:"channel"`
+	EventType         string                        `json:"event_type"`
+	TemplateID        string                        `json:"template_id,omitempty"`
+	TemplateVariables map[string]string             `json:"template_variables,omitempty"`
+	Subject           string                        `json:"subject,omitempty"`
+	Message           string                        `json:"message,omitempty"`
+	Status            NotificationDeliveryStatus    `json:"status"`
+	RetryCount        int                           `json:"retry_count"`
+	MaxRetries        int                           `json:"max_retries"`
+	LastError         string                        `json:"last_error,omitempty"`
+	TraceID           string                        `json:"trace_id,omitempty"`
+	Attempts          []NotificationDeliveryAttempt `json:"attempts,omitempty"`
+	Alert             *NotificationDeliveryAlert    `json:"alert,omitempty"`
+	SentAt            *time.Time                    `json:"sent_at,omitempty"`
+	CreatedAt         time.Time                     `json:"created_at"`
+	UpdatedAt         time.Time                     `json:"updated_at"`
+}
+
+type NotificationChannel string
+
+const (
+	NotificationChannelInApp NotificationChannel = "in_app"
+	NotificationChannelEmail NotificationChannel = "email"
+	NotificationChannelSMS   NotificationChannel = "sms"
+)
+
+type NotificationDeliveryStatus string
+
+const (
+	NotificationStatusPending NotificationDeliveryStatus = "pending"
+	NotificationStatusSent    NotificationDeliveryStatus = "sent"
+	NotificationStatusFailed  NotificationDeliveryStatus = "failed"
+	NotificationStatusAlerted NotificationDeliveryStatus = "alerted"
+)
+
+type NotificationDeliveryAttempt struct {
+	Attempt    int                        `json:"attempt"`
+	Status     NotificationDeliveryStatus `json:"status"`
+	MessageID  string                     `json:"message_id,omitempty"`
+	Error      string                     `json:"error,omitempty"`
+	OccurredAt time.Time                  `json:"occurred_at"`
+}
+
+type NotificationDeliveryAlert struct {
+	Code        string    `json:"code"`
+	Message     string    `json:"message"`
+	TriggeredAt time.Time `json:"triggered_at"`
 }
 
 type CalendarResult struct {

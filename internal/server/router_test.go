@@ -819,8 +819,8 @@ func TestInterviewUpdateTriggersNotificationAndStatusLink(t *testing.T) {
 	if resp.Interview.Status != "rescheduled" {
 		t.Fatalf("expected status rescheduled, got %q", resp.Interview.Status)
 	}
-	if resp.NotificationsEnqueued != 4 {
-		t.Fatalf("expected 4 notifications, got %d", resp.NotificationsEnqueued)
+	if resp.NotificationsEnqueued != 6 {
+		t.Fatalf("expected 6 notifications, got %d", resp.NotificationsEnqueued)
 	}
 	if resp.Candidate.StatusLayer != "interview" {
 		t.Fatalf("expected candidate status_layer interview, got %q", resp.Candidate.StatusLayer)
