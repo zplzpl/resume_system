@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -85,6 +86,150 @@ func TestSuperAdminCanListUsers(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+}
+
+func TestInterviewerCanGetRecruitingDashboard(t *testing.T) {
+	router := mustRouter(t)
+	hrToken := signToken(t, "user_hr_dashboard", "hr")
+	interviewerToken := signToken(t, "iv_dashboard_1", "interviewer")
+
+	candidateID := uploadResumeAndGetCandidateID(t, router, hrToken, "dashboard_resume.pdf", "Name: Dashboard Candidate\nEmail: dashboard@example.com\nSkills: Go\n")
+	interviewID := createInterview(t, router, hrToken, map[string]any{
+		"candidate_id":    candidateID,
+		"interviewer_ids": []string{"iv_dashboard_1"},
+		"starts_at":       "2026-04-01T09:00:00Z",
+		"ends_at":         "2026-04-01T10:00:00Z",
+		"round":           "round-1",
+	})
+	submitEvaluation(t, router, interviewerToken, interviewID, map[string]any{
+		"capability_scores": []map[string]any{
+			{"dimension": "technical_depth", "score": 4, "comment": "solid"},
+			{"dimension": "problem_solving", "score": 4, "comment": "good"},
+			{"dimension": "communication", "score": 4, "comment": "clear"},
+			{"dimension": "collaboration", "score": 5, "comment": "strong"},
+		},
+		"overall_comment": "good candidate",
+		"conclusion":      "hire",
+	}, http.StatusOK)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/analytics/recruiting-dashboard", nil)
+	req.Header.Set("Authorization", "Bearer "+interviewerToken)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Funnel struct {
+			TotalCandidates int `json:"total_candidates"`
+			Stages          []struct {
+				Stage          string  `json:"stage"`
+				CandidateCount int     `json:"candidate_count"`
+				ConversionRate float64 `json:"conversion_rate"`
+			} `json:"stages"`
+		} `json:"funnel"`
+		Efficiency struct {
+			TotalFeedbackCount  int `json:"total_feedback_count"`
+			InterviewerWorkload []struct {
+				InterviewerID string `json:"interviewer_id"`
+				FeedbackCount int    `json:"feedback_count"`
+			} `json:"interviewer_workload"`
+		} `json:"efficiency"`
+		MetricDefinitions []struct {
+			MetricID string `json:"metric_id"`
+		} `json:"metric_definitions"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal dashboard response: %v", err)
+	}
+	if resp.Funnel.TotalCandidates != 1 {
+		t.Fatalf("expected total candidates 1, got %d", resp.Funnel.TotalCandidates)
+	}
+	if len(resp.Funnel.Stages) != 5 {
+		t.Fatalf("expected 5 stages, got %d", len(resp.Funnel.Stages))
+	}
+	if resp.Efficiency.TotalFeedbackCount != 1 {
+		t.Fatalf("expected total feedback count 1, got %d", resp.Efficiency.TotalFeedbackCount)
+	}
+	if len(resp.Efficiency.InterviewerWorkload) != 1 || resp.Efficiency.InterviewerWorkload[0].InterviewerID != "iv_dashboard_1" {
+		t.Fatalf("unexpected interviewer workload: %+v", resp.Efficiency.InterviewerWorkload)
+	}
+	if len(resp.MetricDefinitions) < 4 {
+		t.Fatalf("expected metric definitions, got %d", len(resp.MetricDefinitions))
+	}
+}
+
+func TestRecruitingDashboardCSVExport(t *testing.T) {
+	router := mustRouter(t)
+	hrToken := signToken(t, "user_hr_dashboard_export", "hr")
+	interviewerToken := signToken(t, "iv_dashboard_export_1", "interviewer")
+
+	candidateID := uploadResumeAndGetCandidateID(t, router, hrToken, "dashboard_export_resume.pdf", "Name: Export Candidate\nEmail: export@example.com\nSkills: Go\n")
+	interviewID := createInterview(t, router, hrToken, map[string]any{
+		"candidate_id":    candidateID,
+		"interviewer_ids": []string{"iv_dashboard_export_1"},
+		"starts_at":       "2026-04-01T11:00:00Z",
+		"ends_at":         "2026-04-01T12:00:00Z",
+		"round":           "round-1",
+	})
+	submitEvaluation(t, router, interviewerToken, interviewID, map[string]any{
+		"capability_scores": []map[string]any{
+			{"dimension": "technical_depth", "score": 5, "comment": "excellent"},
+			{"dimension": "problem_solving", "score": 4, "comment": "stable"},
+			{"dimension": "communication", "score": 4, "comment": "clear"},
+			{"dimension": "collaboration", "score": 4, "comment": "good"},
+		},
+		"overall_comment": "export ready",
+		"conclusion":      "strong_hire",
+	}, http.StatusOK)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/analytics/recruiting-dashboard/export.csv", nil)
+	req.Header.Set("Authorization", "Bearer "+hrToken)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, w.Code, w.Body.String())
+	}
+	if contentType := w.Header().Get("Content-Type"); !strings.Contains(contentType, "text/csv") {
+		t.Fatalf("expected csv content-type, got %q", contentType)
+	}
+	if disposition := w.Header().Get("Content-Disposition"); !strings.Contains(disposition, "recruiting_dashboard.csv") {
+		t.Fatalf("expected csv attachment filename, got %q", disposition)
+	}
+
+	records, err := csv.NewReader(strings.NewReader(w.Body.String())).ReadAll()
+	if err != nil {
+		t.Fatalf("parse csv: %v", err)
+	}
+	if len(records) < 2 {
+		t.Fatalf("expected at least 2 csv rows, got %d", len(records))
+	}
+	if len(records[0]) < 4 || records[0][0] != "section" || records[0][1] != "metric" {
+		t.Fatalf("unexpected csv header: %+v", records[0])
+	}
+
+	var hasTotalFeedback bool
+	var hasDefinition bool
+	for _, record := range records[1:] {
+		if len(record) < 2 {
+			continue
+		}
+		if record[1] == "total_feedback_count" {
+			hasTotalFeedback = true
+		}
+		if record[0] == "definition" && record[1] == "stage_conversion_rate" {
+			hasDefinition = true
+		}
+	}
+	if !hasTotalFeedback {
+		t.Fatalf("expected total_feedback_count row in csv")
+	}
+	if !hasDefinition {
+		t.Fatalf("expected stage_conversion_rate definition row in csv")
 	}
 }
 
