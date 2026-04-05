@@ -55,7 +55,10 @@ Supabase Auth + RBAC skeleton for resume system backend.
 - Interview scheduling:
   - Supports day/week/month calendar slices for interview events
   - Detects candidate/interviewer time conflicts when creating/updating schedules
-  - Enqueues notification events for create/update operations (in-app + email)
+  - Enqueues notification events for create/update operations (in-app + email + sms)
+  - Uses channel templates with runtime variable rendering (`{{interview_id}}`, `{{starts_at}}`, etc.)
+  - Retries failed deliveries with alert escalation after retry exhaustion
+  - Returns per-notification delivery trace (`trace_id`, attempts, status, alert metadata)
   - Links candidate flow status to `interview` when schedule is created or changed
 - Real-time interview transcription:
   - Supports interview-scoped transcription sessions to continuously append transcript segments

@@ -50,14 +50,16 @@ type OperationResult struct {
 }
 
 type Service struct {
-	repo        *MemoryRepository
-	questionGen QuestionGenerator
+	repo                   *MemoryRepository
+	questionGen            QuestionGenerator
+	notificationDispatcher *NotificationDispatcher
 }
 
 func NewService(repo *MemoryRepository) *Service {
 	return &Service{
-		repo:        repo,
-		questionGen: NewDefaultQuestionGenerator(),
+		repo:                   repo,
+		questionGen:            NewDefaultQuestionGenerator(),
+		notificationDispatcher: NewNotificationDispatcher(nil, defaultNotificationMaxRetries),
 	}
 }
 
@@ -66,8 +68,9 @@ func NewServiceWithQuestionGenerator(repo *MemoryRepository, generator QuestionG
 		generator = NewDefaultQuestionGenerator()
 	}
 	return &Service{
-		repo:        repo,
-		questionGen: generator,
+		repo:                   repo,
+		questionGen:            generator,
+		notificationDispatcher: NewNotificationDispatcher(nil, defaultNotificationMaxRetries),
 	}
 }
 
@@ -101,7 +104,7 @@ func (s *Service) Create(req CreateRequest) (OperationResult, error) {
 	}
 
 	created := s.repo.CreateInterview(item)
-	events := s.repo.EnqueueNotifications(buildNotificationEvents(created, "interview.created"))
+	events := s.dispatchNotifications(s.repo.EnqueueNotifications(buildNotificationEvents(created, "interview.created")))
 	return OperationResult{
 		Interview:             created,
 		Notifications:         events,
@@ -164,7 +167,7 @@ func (s *Service) Update(id string, req UpdateRequest) (OperationResult, error) 
 	}
 
 	updated := s.repo.UpdateInterview(item)
-	events := s.repo.EnqueueNotifications(buildNotificationEvents(updated, "interview.updated"))
+	events := s.dispatchNotifications(s.repo.EnqueueNotifications(buildNotificationEvents(updated, "interview.updated")))
 	return OperationResult{
 		Interview:             updated,
 		Notifications:         events,
@@ -274,35 +277,6 @@ func (s *Service) ListInterviews() []Interview {
 	return s.repo.ListInterviews()
 }
 
-func buildNotificationEvents(item Interview, eventType string) []NotificationEvent {
-	events := make([]NotificationEvent, 0, (1+len(item.InterviewerIDs))*2)
-	channels := []string{"in_app", "email"}
-
-	for _, channel := range channels {
-		events = append(events, NotificationEvent{
-			InterviewID:   item.ID,
-			RecipientID:   item.CandidateID,
-			RecipientType: "candidate",
-			Channel:       channel,
-			EventType:     eventType,
-		})
-	}
-
-	for _, interviewerID := range item.InterviewerIDs {
-		for _, channel := range channels {
-			events = append(events, NotificationEvent{
-				InterviewID:   item.ID,
-				RecipientID:   interviewerID,
-				RecipientType: "interviewer",
-				Channel:       channel,
-				EventType:     eventType,
-			})
-		}
-	}
-
-	return events
-}
-
 func calendarRange(view CalendarView, anchor time.Time) (time.Time, time.Time) {
 	base := time.Date(anchor.Year(), anchor.Month(), anchor.Day(), 0, 0, 0, 0, time.UTC)
 	switch view {
@@ -365,6 +339,20 @@ func normalizeRound(raw string) string {
 		return "round-1"
 	}
 	return raw
+}
+
+func (s *Service) dispatchNotifications(events []NotificationEvent) []NotificationEvent {
+	if len(events) == 0 {
+		return nil
+	}
+
+	dispatched := make([]NotificationEvent, 0, len(events))
+	for _, event := range events {
+		sent := s.notificationDispatcher.Dispatch(event)
+		s.repo.UpdateNotification(sent)
+		dispatched = append(dispatched, sent)
+	}
+	return dispatched
 }
 
 func maxTime(a, b time.Time) time.Time {
