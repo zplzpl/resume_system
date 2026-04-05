@@ -13,6 +13,7 @@ import (
 	"github.com/zplzpl/resume_system/internal/httpx"
 	"github.com/zplzpl/resume_system/internal/interview"
 	"github.com/zplzpl/resume_system/internal/rbac"
+	"github.com/zplzpl/resume_system/internal/report"
 	"github.com/zplzpl/resume_system/internal/resume"
 )
 
@@ -20,6 +21,7 @@ type handler struct {
 	authClient   auth.Client
 	resumeSvc    *resume.Service
 	interviewSvc *interview.Service
+	reportSvc    *report.Service
 }
 
 type createCandidateRequest struct {
@@ -82,6 +84,7 @@ func NewRouter(cfg config.Config) (*gin.Engine, error) {
 		authClient:   auth.NewSupabaseClient(cfg.SupabaseURL, cfg.SupabaseAnonKey),
 		resumeSvc:    resume.NewService(resume.NewMemoryRepository(), storage, resume.NewHeuristicParser()),
 		interviewSvc: interview.NewService(interview.NewMemoryRepository()),
+		reportSvc:    report.NewService(nil),
 	}
 
 	verifier, err := auth.NewJWTVerifier(cfg.SupabaseJWTSecret)
@@ -124,6 +127,8 @@ func NewRouter(cfg config.Config) (*gin.Engine, error) {
 		protected.POST("/interviews/:id/question-recommendations", auth.RequirePermission(rbac.ActionInterviewManage), h.generateInterviewQuestionRecommendation)
 		protected.GET("/interviews/:id/question-recommendations", auth.RequirePermission(rbac.ActionInterviewManage), h.getInterviewQuestionRecommendation)
 		protected.GET("/candidates/:id/evaluations/latest", auth.RequirePermission(rbac.ActionInterviewManage), h.getCandidateLatestEvaluations)
+		protected.POST("/candidates/:id/interview-report", auth.RequirePermission(rbac.ActionInterviewManage), h.generateInterviewReport)
+		protected.GET("/interview-reports/:id/export", auth.RequirePermission(rbac.ActionInterviewManage), h.exportInterviewReport)
 		protected.GET("/admin/users", auth.RequirePermission(rbac.ActionUserManage), h.listUsers)
 	}
 
@@ -667,6 +672,109 @@ func (h *handler) getInterviewQuestionRecommendation(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"recommendation": recommendation,
 	})
+}
+
+func (h *handler) generateInterviewReport(c *gin.Context) {
+	candidateID := strings.TrimSpace(c.Param("id"))
+	candidate, ok := h.resumeSvc.GetCandidate(candidateID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": "candidate not found"})
+		return
+	}
+
+	view := h.interviewSvc.BuildCandidateLatestEvaluationsView(candidateID)
+	if len(view.LatestEvaluations) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    "BAD_REQUEST",
+			"message": "cannot generate interview report: no latest evaluations found for candidate",
+		})
+		return
+	}
+
+	evaluations := make([]report.EvaluationSnapshot, 0, len(view.LatestEvaluations))
+	for _, item := range view.LatestEvaluations {
+		scores := make([]report.CapabilityScore, 0, len(item.CapabilityScores))
+		for _, score := range item.CapabilityScores {
+			scores = append(scores, report.CapabilityScore{
+				Dimension: score.Dimension,
+				Score:     score.Score,
+				Comment:   score.Comment,
+			})
+		}
+		evaluations = append(evaluations, report.EvaluationSnapshot{
+			InterviewID:      item.InterviewID,
+			Round:            item.Round,
+			InterviewerID:    item.InterviewerID,
+			AverageScore:     item.AverageScore,
+			CapabilityScores: scores,
+			OverallComment:   item.OverallComment,
+			Conclusion:       string(item.Conclusion),
+			SubmittedAt:      item.SubmittedAt,
+		})
+	}
+
+	generatedBy := ""
+	if user := auth.MustUser(c); user != nil {
+		generatedBy = user.ID
+	}
+
+	generated, err := h.reportSvc.Generate(report.GenerateRequest{
+		Candidate: report.CandidateSnapshot{
+			ID:             candidate.ID,
+			FullName:       candidate.FullName,
+			Email:          candidate.Email,
+			Phone:          candidate.Phone,
+			CurrentTitle:   candidate.CurrentTitle,
+			CurrentCompany: candidate.CurrentCompany,
+			StatusLayer:    string(candidate.StatusLayer),
+		},
+		Evaluations: evaluations,
+		GeneratedBy: generatedBy,
+	})
+	if err != nil {
+		var validationErr report.ValidationErrors
+		if errors.As(err, &validationErr) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"code":    "BAD_REQUEST",
+				"message": "report generation request is invalid",
+				"details": gin.H{"fields": validationErr},
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"code": "INTERNAL_ERROR", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"generated": true,
+		"report":    generated,
+	})
+}
+
+func (h *handler) exportInterviewReport(c *gin.Context) {
+	reportID := strings.TrimSpace(c.Param("id"))
+	if reportID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "report id is required"})
+		return
+	}
+
+	fileName, contentType, content, err := h.reportSvc.Export(reportID, c.Query("format"))
+	if err != nil {
+		switch {
+		case errors.Is(err, report.ErrReportNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": "report not found"})
+		case errors.Is(err, report.ErrUnsupportedExportFormat):
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "unsupported export format: use json or markdown"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"code": "INTERNAL_ERROR", "message": err.Error()})
+		}
+		return
+	}
+
+	c.Header("Content-Type", contentType)
+	c.Header("Content-Disposition", `attachment; filename="`+fileName+`"`)
+	c.Status(http.StatusOK)
+	_, _ = c.Writer.Write(content)
 }
 
 func parseCalendarAnchor(raw string) (time.Time, error) {

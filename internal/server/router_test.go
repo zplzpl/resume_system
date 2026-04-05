@@ -632,6 +632,139 @@ func TestInterviewEvaluationSubmitArchiveAndCandidateLatestView(t *testing.T) {
 	}
 }
 
+func TestInterviewReportGenerateDeterministicAndExport(t *testing.T) {
+	router := mustRouter(t)
+	hrToken := signToken(t, "user_hr", "hr")
+	interviewerToken := signToken(t, "iv_report_1", "interviewer")
+
+	candidateID := uploadResumeAndGetCandidateID(t, router, hrToken, "report_resume.pdf", "Name: Report Candidate\nEmail: report@example.com\nCurrent Company: Acme\nTitle: Backend Engineer\nSkills: Go\n")
+	interviewID := createInterview(t, router, hrToken, map[string]any{
+		"candidate_id":    candidateID,
+		"interviewer_ids": []string{"iv_report_1"},
+		"starts_at":       "2026-04-12T09:00:00Z",
+		"ends_at":         "2026-04-12T10:00:00Z",
+		"round":           "round-1",
+	})
+
+	submitEvaluation(t, router, interviewerToken, interviewID, map[string]any{
+		"capability_scores": []map[string]any{
+			{"dimension": "technical_depth", "score": 5, "comment": "excellent"},
+			{"dimension": "problem_solving", "score": 4, "comment": "good decomposition"},
+			{"dimension": "communication", "score": 4, "comment": "clear"},
+			{"dimension": "collaboration", "score": 5, "comment": "strong ownership"},
+		},
+		"overall_comment": "ready for next stage",
+		"conclusion":      "strong_hire",
+	}, http.StatusOK)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/candidates/"+candidateID+"/interview-report", nil)
+	req.Header.Set("Authorization", "Bearer "+hrToken)
+	firstW := httptest.NewRecorder()
+	router.ServeHTTP(firstW, req)
+	if firstW.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusCreated, firstW.Code, firstW.Body.String())
+	}
+
+	var firstResp struct {
+		Report struct {
+			ReportID              string  `json:"report_id"`
+			AverageScore          float64 `json:"average_score"`
+			HiringRecommendation  string  `json:"hiring_recommendation"`
+			SourceEvaluationCount int     `json:"source_evaluation_count"`
+			GeneratedAt           string  `json:"generated_at"`
+			Candidate             struct {
+				ID       string `json:"id"`
+				FullName string `json:"full_name"`
+			} `json:"candidate"`
+		} `json:"report"`
+	}
+	if err := json.Unmarshal(firstW.Body.Bytes(), &firstResp); err != nil {
+		t.Fatalf("unmarshal first report response: %v", err)
+	}
+	if firstResp.Report.ReportID == "" {
+		t.Fatalf("expected report id")
+	}
+	if firstResp.Report.Candidate.ID != candidateID {
+		t.Fatalf("expected candidate id %q, got %q", candidateID, firstResp.Report.Candidate.ID)
+	}
+	if firstResp.Report.AverageScore <= 0 {
+		t.Fatalf("expected positive average score, got %f", firstResp.Report.AverageScore)
+	}
+	if firstResp.Report.HiringRecommendation == "" {
+		t.Fatalf("expected hiring recommendation")
+	}
+	if firstResp.Report.SourceEvaluationCount != 1 {
+		t.Fatalf("expected source evaluation count 1, got %d", firstResp.Report.SourceEvaluationCount)
+	}
+
+	reqRepeat := httptest.NewRequest(http.MethodPost, "/api/v1/candidates/"+candidateID+"/interview-report", nil)
+	reqRepeat.Header.Set("Authorization", "Bearer "+hrToken)
+	secondW := httptest.NewRecorder()
+	router.ServeHTTP(secondW, reqRepeat)
+	if secondW.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusCreated, secondW.Code, secondW.Body.String())
+	}
+	var secondResp struct {
+		Report struct {
+			ReportID    string `json:"report_id"`
+			GeneratedAt string `json:"generated_at"`
+		} `json:"report"`
+	}
+	if err := json.Unmarshal(secondW.Body.Bytes(), &secondResp); err != nil {
+		t.Fatalf("unmarshal second report response: %v", err)
+	}
+	if firstResp.Report.ReportID != secondResp.Report.ReportID {
+		t.Fatalf("expected deterministic report id, got %q vs %q", firstResp.Report.ReportID, secondResp.Report.ReportID)
+	}
+	if firstResp.Report.GeneratedAt != secondResp.Report.GeneratedAt {
+		t.Fatalf("expected deterministic generated_at, got %q vs %q", firstResp.Report.GeneratedAt, secondResp.Report.GeneratedAt)
+	}
+
+	exportJSONReq := httptest.NewRequest(http.MethodGet, "/api/v1/interview-reports/"+firstResp.Report.ReportID+"/export?format=json", nil)
+	exportJSONReq.Header.Set("Authorization", "Bearer "+hrToken)
+	exportJSONW := httptest.NewRecorder()
+	router.ServeHTTP(exportJSONW, exportJSONReq)
+	if exportJSONW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, exportJSONW.Code, exportJSONW.Body.String())
+	}
+	if !strings.Contains(exportJSONW.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("expected json content-type, got %q", exportJSONW.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(exportJSONW.Body.String(), `"final_comment"`) {
+		t.Fatalf("expected final_comment in json export body")
+	}
+
+	exportMarkdownReq := httptest.NewRequest(http.MethodGet, "/api/v1/interview-reports/"+firstResp.Report.ReportID+"/export?format=markdown", nil)
+	exportMarkdownReq.Header.Set("Authorization", "Bearer "+hrToken)
+	exportMarkdownW := httptest.NewRecorder()
+	router.ServeHTTP(exportMarkdownW, exportMarkdownReq)
+	if exportMarkdownW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, exportMarkdownW.Code, exportMarkdownW.Body.String())
+	}
+	if !strings.Contains(exportMarkdownW.Body.String(), "## Score Details") {
+		t.Fatalf("expected markdown score section")
+	}
+}
+
+func TestInterviewReportGenerationRequiresEvaluations(t *testing.T) {
+	router := mustRouter(t)
+	hrToken := signToken(t, "user_hr", "hr")
+
+	candidateID := uploadResumeAndGetCandidateID(t, router, hrToken, "report_no_eval_resume.pdf", "Name: No Eval\nEmail: no-eval@example.com\nSkills: Go\n")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/candidates/"+candidateID+"/interview-report", nil)
+	req.Header.Set("Authorization", "Bearer "+hrToken)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "no latest evaluations found for candidate") {
+		t.Fatalf("expected explicit error message, got %s", w.Body.String())
+	}
+}
+
 func TestInterviewEvaluationValidationAndPermission(t *testing.T) {
 	router := mustRouter(t)
 	hrToken := signToken(t, "user_hr", "hr")
