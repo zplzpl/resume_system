@@ -24,6 +24,9 @@ Supabase Auth + RBAC skeleton for resume system backend.
   - `POST /api/v1/interviews`
   - `PATCH /api/v1/interviews/:id`
   - `GET /api/v1/interviews/calendar?view=day|week|month&date=YYYY-MM-DD`
+  - `POST /api/v1/interviews/:id/evaluations`
+  - `GET /api/v1/interviews/:id/evaluations`
+  - `GET /api/v1/candidates/:id/evaluations/latest`
   - `GET /api/v1/admin/users`
 - Unified unauthorized response code (`UNAUTHORIZED`) for 401/403 cases
 - Resume upload/parse pipeline:
@@ -41,6 +44,11 @@ Supabase Auth + RBAC skeleton for resume system backend.
   - Detects candidate/interviewer time conflicts when creating/updating schedules
   - Enqueues notification events for create/update operations (in-app + email)
   - Links candidate flow status to `interview` when schedule is created or changed
+- Structured interview evaluation:
+  - Uses fixed capability template (`technical_depth` / `problem_solving` / `communication` / `collaboration`)
+  - Validates score range (1-5) and conclusion enum (`strong_hire` / `hire` / `hold` / `no_hire`)
+  - Stores versioned evaluation archives per interviewer/interview and marks latest records
+  - Provides candidate-level latest evaluation view grouped by round for report generation
 
 ## Environment Variables
 
