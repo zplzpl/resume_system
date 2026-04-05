@@ -8,21 +8,29 @@ import (
 )
 
 type MemoryRepository struct {
-	mu                sync.RWMutex
-	interviews        map[string]Interview
-	evaluationArchive map[string][]Evaluation
-	questionBank      map[string]QuestionRecommendation
-	notificationLog   []NotificationEvent
-	nextInterview     int64
-	nextEvent         int64
-	nextEvaluation    int64
+	mu                       sync.RWMutex
+	interviews               map[string]Interview
+	evaluationArchive        map[string][]Evaluation
+	questionBank             map[string]QuestionRecommendation
+	transcriptSessions       map[string]TranscriptSession
+	transcriptSegments       map[string][]TranscriptSegment
+	transcriptSeqByInterview map[string]int64
+	notificationLog          []NotificationEvent
+	nextInterview            int64
+	nextEvent                int64
+	nextEvaluation           int64
+	nextTranscriptSession    int64
+	nextTranscriptSegment    int64
 }
 
 func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{
-		interviews:        make(map[string]Interview),
-		evaluationArchive: make(map[string][]Evaluation),
-		questionBank:      make(map[string]QuestionRecommendation),
+		interviews:               make(map[string]Interview),
+		evaluationArchive:        make(map[string][]Evaluation),
+		questionBank:             make(map[string]QuestionRecommendation),
+		transcriptSessions:       make(map[string]TranscriptSession),
+		transcriptSegments:       make(map[string][]TranscriptSegment),
+		transcriptSeqByInterview: make(map[string]int64),
 	}
 }
 
@@ -183,6 +191,96 @@ func (r *MemoryRepository) GetQuestionRecommendation(interviewID string) (Questi
 	return cloneQuestionRecommendation(item), true
 }
 
+func (r *MemoryRepository) CreateTranscriptSession(item TranscriptSession) TranscriptSession {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.nextTranscriptSession++
+	now := time.Now().UTC()
+	item.ID = fmt.Sprintf("tsn_%06d", r.nextTranscriptSession)
+	if item.Status == "" {
+		item.Status = TranscriptSessionStatusActive
+	}
+	item.StartedAt = now
+	item.UpdatedAt = now
+	item.LastSequence = 0
+	item.LastError = ""
+	r.transcriptSessions[item.ID] = item
+	return cloneTranscriptSession(item)
+}
+
+func (r *MemoryRepository) UpdateTranscriptSession(item TranscriptSession) TranscriptSession {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	item.UpdatedAt = time.Now().UTC()
+	r.transcriptSessions[item.ID] = item
+	return cloneTranscriptSession(item)
+}
+
+func (r *MemoryRepository) GetTranscriptSession(id string) (TranscriptSession, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	item, ok := r.transcriptSessions[id]
+	if !ok {
+		return TranscriptSession{}, false
+	}
+	return cloneTranscriptSession(item), true
+}
+
+func (r *MemoryRepository) AppendTranscriptSegment(item TranscriptSegment) TranscriptSegment {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.nextTranscriptSegment++
+	item.ID = fmt.Sprintf("trc_%06d", r.nextTranscriptSegment)
+	r.transcriptSeqByInterview[item.InterviewID]++
+	item.Sequence = r.transcriptSeqByInterview[item.InterviewID]
+	item.ReceivedAt = time.Now().UTC()
+	item.StartedAt = cloneTimePtr(item.StartedAt)
+	item.EndedAt = cloneTimePtr(item.EndedAt)
+
+	r.transcriptSegments[item.InterviewID] = append(r.transcriptSegments[item.InterviewID], item)
+	return cloneTranscriptSegment(item)
+}
+
+func (r *MemoryRepository) ListTranscriptSegmentsByInterviewSince(interviewID string, sinceSeq int64, limit int) ([]TranscriptSegment, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	items := r.transcriptSegments[interviewID]
+	if len(items) == 0 {
+		return nil, false
+	}
+	if limit <= 0 {
+		limit = len(items)
+	}
+
+	out := make([]TranscriptSegment, 0, limit)
+	hasMore := false
+
+	for _, item := range items {
+		if item.Sequence <= sinceSeq {
+			continue
+		}
+		if len(out) >= limit {
+			hasMore = true
+			break
+		}
+		out = append(out, cloneTranscriptSegment(item))
+	}
+
+	if len(out) > 0 {
+		lastSeq := out[len(out)-1].Sequence
+		if items[len(items)-1].Sequence > lastSeq {
+			hasMore = true
+		}
+	}
+
+	return out, hasMore
+}
+
 func cloneInterview(in Interview) Interview {
 	out := in
 	out.InterviewerIDs = append([]string(nil), in.InterviewerIDs...)
@@ -206,5 +304,16 @@ func cloneCapabilityScores(in []CapabilityScore) []CapabilityScore {
 func cloneQuestionRecommendation(in QuestionRecommendation) QuestionRecommendation {
 	out := in
 	out.Questions = append([]RecommendedQuestion(nil), in.Questions...)
+	return out
+}
+
+func cloneTranscriptSession(in TranscriptSession) TranscriptSession {
+	return in
+}
+
+func cloneTranscriptSegment(in TranscriptSegment) TranscriptSegment {
+	out := in
+	out.StartedAt = cloneTimePtr(in.StartedAt)
+	out.EndedAt = cloneTimePtr(in.EndedAt)
 	return out
 }
