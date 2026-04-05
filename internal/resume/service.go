@@ -100,6 +100,10 @@ func (s *Service) CandidateExists(candidateID string) bool {
 	return ok
 }
 
+func (s *Service) GetCandidate(candidateID string) (CandidateProfile, bool) {
+	return s.repo.GetCandidate(strings.TrimSpace(candidateID))
+}
+
 func (s *Service) UpdateCandidateStatusLayer(candidateID, statusRaw string) (CandidateProfile, error) {
 	status, err := ParseCandidateStatusLayer(statusRaw)
 	if err != nil {

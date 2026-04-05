@@ -26,6 +26,8 @@ Supabase Auth + RBAC skeleton for resume system backend.
   - `GET /api/v1/interviews/calendar?view=day|week|month&date=YYYY-MM-DD`
   - `POST /api/v1/interviews/:id/evaluations`
   - `GET /api/v1/interviews/:id/evaluations`
+  - `POST /api/v1/interviews/:id/question-recommendations`
+  - `GET /api/v1/interviews/:id/question-recommendations`
   - `GET /api/v1/candidates/:id/evaluations/latest`
   - `GET /api/v1/admin/users`
 - Unified unauthorized response code (`UNAUTHORIZED`) for 401/403 cases
