@@ -14,7 +14,7 @@ Supabase Auth + RBAC skeleton for resume system backend.
   - `hr`
   - `interviewer`
 - Core protected APIs with permission checks:
-  - `GET /api/v1/candidates` (supports combined filters: `keyword`/`skill`/`company`/`school` + `status_layer`)
+  - `GET /api/v1/candidates` (supports combined filters: `keyword`/`skill`/`company`/`school`/`location` + `status_layer`, `min_experience_years`, `max_experience_years`; also supports natural-language query via `natural_query`/`q` and returns parsed explainable conditions)
   - `POST /api/v1/candidates`
   - `PATCH /api/v1/candidates/:id/status-layer`
   - `POST /api/v1/resumes/upload`

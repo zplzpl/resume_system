@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -469,6 +470,77 @@ func TestCandidateSearchWithCombinedFiltersAndStatusLayer(t *testing.T) {
 	}
 	if len(multiResp.Items) != 2 {
 		t.Fatalf("expected 2 candidates for multi status filter, got %d", len(multiResp.Items))
+	}
+}
+
+func TestCandidateSearchWithNaturalQuery(t *testing.T) {
+	router := mustRouter(t)
+	token := signToken(t, "user_hr", "hr")
+
+	candidateA := uploadResumeAndGetCandidateID(t, router, token, "natural_a.pdf", "Name: Alice Zhang\nEmail: alice@example.com\nCurrent Company: ACME Cloud\nEducation: Tsinghua University\nLocation: Beijing\nSkills: Go, SQL\nExperience: 5 years\n")
+	_ = uploadResumeAndGetCandidateID(t, router, token, "natural_b.pdf", "Name: Bob Li\nEmail: bob@example.com\nCurrent Company: Globex\nEducation: Stanford University\nLocation: Shanghai\nSkills: Java, Spring\nExperience: 2 years\n")
+	updateCandidateStatusLayer(t, router, token, candidateA, "screening")
+
+	rawQuery := "筛选中，技能: Go，公司: ACME，学校: Tsinghua，地点: Beijing，3年以上"
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/candidates?natural_query="+url.QueryEscape(rawQuery), nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+		NaturalQuery struct {
+			Raw              string `json:"raw"`
+			ParsedConditions []struct {
+				Field string `json:"field"`
+			} `json:"parsed_conditions"`
+		} `json:"natural_query"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal search response: %v", err)
+	}
+	if len(resp.Items) != 1 || resp.Items[0].ID != candidateA {
+		t.Fatalf("expected only candidate %s, got %+v", candidateA, resp.Items)
+	}
+	if resp.NaturalQuery.Raw != rawQuery {
+		t.Fatalf("expected natural query echo, got %q", resp.NaturalQuery.Raw)
+	}
+	if len(resp.NaturalQuery.ParsedConditions) == 0 {
+		t.Fatalf("expected parsed conditions in response")
+	}
+}
+
+func TestCandidateSearchNaturalQueryParseFailure(t *testing.T) {
+	router := mustRouter(t)
+	token := signToken(t, "user_hr", "hr")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/candidates?natural_query="+url.QueryEscape("!!! ???"), nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal error response: %v", err)
+	}
+	if resp.Code != "NATURAL_QUERY_UNPARSEABLE" {
+		t.Fatalf("expected NATURAL_QUERY_UNPARSEABLE, got %q", resp.Code)
+	}
+	if resp.Message == "" {
+		t.Fatalf("expected friendly error message")
 	}
 }
 

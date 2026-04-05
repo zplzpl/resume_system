@@ -138,8 +138,20 @@ func (r *MemoryRepository) SearchCandidates(options CandidateSearchOptions) []Ca
 	}
 	keyword := strings.ToLower(strings.TrimSpace(options.Keyword))
 	skill := strings.ToLower(strings.TrimSpace(options.Skill))
+	skills := make([]string, 0, len(options.Skills))
+	for _, item := range options.Skills {
+		v := strings.ToLower(strings.TrimSpace(item))
+		if v == "" {
+			continue
+		}
+		skills = append(skills, v)
+	}
+	if skill != "" && len(skills) == 0 {
+		skills = append(skills, skill)
+	}
 	company := strings.ToLower(strings.TrimSpace(options.Company))
 	school := strings.ToLower(strings.TrimSpace(options.School))
+	location := strings.ToLower(strings.TrimSpace(options.Location))
 	for _, candidate := range r.candidates {
 		if len(statusSet) > 0 {
 			if _, ok := statusSet[candidate.StatusLayer]; !ok {
@@ -149,13 +161,31 @@ func (r *MemoryRepository) SearchCandidates(options CandidateSearchOptions) []Ca
 		if keyword != "" && !matchesAnyCandidateField(candidate, keyword) {
 			continue
 		}
-		if skill != "" && !containsSkill(candidate.Skills, skill) {
-			continue
+		if len(skills) > 0 {
+			matched := true
+			for _, required := range skills {
+				if !containsSkill(candidate.Skills, required) {
+					matched = false
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
 		}
 		if company != "" && !strings.Contains(strings.ToLower(candidate.CurrentCompany), company) {
 			continue
 		}
 		if school != "" && !strings.Contains(strings.ToLower(candidate.HighestEducation), school) {
+			continue
+		}
+		if location != "" && !strings.Contains(strings.ToLower(candidate.Location), location) {
+			continue
+		}
+		if options.MinExperienceMonths > 0 && candidate.TotalExperienceMonths < options.MinExperienceMonths {
+			continue
+		}
+		if options.MaxExperienceMonths > 0 && candidate.TotalExperienceMonths > options.MaxExperienceMonths {
 			continue
 		}
 		items = append(items, cloneCandidate(candidate))
@@ -224,7 +254,9 @@ func matchesAnyCandidateField(candidate CandidateProfile, keyword string) bool {
 		candidate.FullName,
 		candidate.Email,
 		candidate.CurrentCompany,
+		candidate.CurrentTitle,
 		candidate.HighestEducation,
+		candidate.Location,
 	}
 	for _, field := range searchFields {
 		if strings.Contains(strings.ToLower(field), keyword) {

@@ -101,8 +101,25 @@ func (s *Service) ListCandidates() []CandidateProfile {
 func (s *Service) SearchCandidates(options CandidateSearchOptions) []CandidateProfile {
 	options.Keyword = strings.TrimSpace(options.Keyword)
 	options.Skill = strings.TrimSpace(options.Skill)
+	options.Skills = normalizeSearchSkills(options.Skills)
+	if options.Skill == "" && len(options.Skills) > 0 {
+		options.Skill = options.Skills[0]
+	}
+	if options.Skill != "" && len(options.Skills) == 0 {
+		options.Skills = []string{options.Skill}
+	}
 	options.Company = strings.TrimSpace(options.Company)
 	options.School = strings.TrimSpace(options.School)
+	options.Location = strings.TrimSpace(options.Location)
+	if options.MinExperienceMonths < 0 {
+		options.MinExperienceMonths = 0
+	}
+	if options.MaxExperienceMonths < 0 {
+		options.MaxExperienceMonths = 0
+	}
+	if options.MinExperienceMonths > 0 && options.MaxExperienceMonths > 0 && options.MinExperienceMonths > options.MaxExperienceMonths {
+		options.MinExperienceMonths, options.MaxExperienceMonths = options.MaxExperienceMonths, options.MinExperienceMonths
+	}
 	return s.repo.SearchCandidates(options)
 }
 
@@ -179,4 +196,28 @@ func IsInvalidStatusLayer(err error) bool {
 
 func IsResumeNotFound(err error) bool {
 	return errors.Is(err, ErrResumeNotFound)
+}
+
+func normalizeSearchSkills(skills []string) []string {
+	if len(skills) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(skills))
+	seen := make(map[string]struct{}, len(skills))
+	for _, skill := range skills {
+		item := strings.TrimSpace(skill)
+		if item == "" {
+			continue
+		}
+		key := strings.ToLower(item)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, item)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

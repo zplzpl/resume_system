@@ -253,15 +253,187 @@ func (h *handler) listCandidates(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
 		return
 	}
+	minExperienceMonths, err := parseExperienceMonthsQuery(c.Query("min_experience_years"), "min_experience_years")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		return
+	}
+	maxExperienceMonths, err := parseExperienceMonthsQuery(c.Query("max_experience_years"), "max_experience_years")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		return
+	}
+	skills := splitQueryList(c.Query("skill"))
 
 	options := resume.CandidateSearchOptions{
-		Keyword:    strings.TrimSpace(c.Query("keyword")),
-		Skill:      strings.TrimSpace(c.Query("skill")),
-		Company:    strings.TrimSpace(c.Query("company")),
-		School:     strings.TrimSpace(c.Query("school")),
-		StatusList: statusList,
+		Keyword:             strings.TrimSpace(c.Query("keyword")),
+		Skill:               strings.TrimSpace(c.Query("skill")),
+		Skills:              skills,
+		Company:             strings.TrimSpace(c.Query("company")),
+		School:              strings.TrimSpace(c.Query("school")),
+		Location:            strings.TrimSpace(c.Query("location")),
+		StatusList:          statusList,
+		MinExperienceMonths: minExperienceMonths,
+		MaxExperienceMonths: maxExperienceMonths,
 	}
-	c.JSON(http.StatusOK, gin.H{"items": h.resumeSvc.SearchCandidates(options)})
+
+	naturalQuery := strings.TrimSpace(c.Query("natural_query"))
+	if naturalQuery == "" {
+		naturalQuery = strings.TrimSpace(c.Query("q"))
+	}
+	var parsedConditions []resume.ParsedCandidateCondition
+	if naturalQuery != "" {
+		plan, parseErr := resume.ParseNaturalCandidateQuery(naturalQuery)
+		if parseErr != nil {
+			code := "BAD_REQUEST"
+			if resume.IsNaturalQueryErr(parseErr) {
+				code = "NATURAL_QUERY_UNPARSEABLE"
+			}
+			c.JSON(http.StatusBadRequest, gin.H{
+				"code":    code,
+				"message": "unable to parse natural query; try including conditions like skill/company/school/status/experience",
+				"detail":  parseErr.Error(),
+			})
+			return
+		}
+		options = mergeCandidateSearchOptions(options, plan.Options)
+		parsedConditions = plan.Conditions
+	}
+
+	resp := gin.H{"items": h.resumeSvc.SearchCandidates(options)}
+	if naturalQuery != "" {
+		resp["natural_query"] = gin.H{
+			"raw":               naturalQuery,
+			"parsed_conditions": parsedConditions,
+		}
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+func parseExperienceMonthsQuery(raw string, field string) (int, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, nil
+	}
+	years, err := strconv.Atoi(value)
+	if err != nil || years < 0 {
+		return 0, fmt.Errorf("%s must be a non-negative integer", field)
+	}
+	return years * 12, nil
+}
+
+func splitQueryList(raw string) []string {
+	items := strings.Split(raw, ",")
+	out := make([]string, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToLower(trimmed)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func mergeCandidateSearchOptions(base resume.CandidateSearchOptions, parsed resume.CandidateSearchOptions) resume.CandidateSearchOptions {
+	base.Keyword = mergeTextCondition(base.Keyword, parsed.Keyword)
+	base.Skill = mergeTextCondition(base.Skill, parsed.Skill)
+	base.Skills = mergeSkills(base.Skills, parsed.Skills, base.Skill, parsed.Skill)
+	base.Company = mergeTextCondition(base.Company, parsed.Company)
+	base.School = mergeTextCondition(base.School, parsed.School)
+	base.Location = mergeTextCondition(base.Location, parsed.Location)
+	base.StatusList = mergeStatusConditions(base.StatusList, parsed.StatusList)
+
+	if parsed.MinExperienceMonths > base.MinExperienceMonths {
+		base.MinExperienceMonths = parsed.MinExperienceMonths
+	}
+	switch {
+	case base.MaxExperienceMonths == 0:
+		base.MaxExperienceMonths = parsed.MaxExperienceMonths
+	case parsed.MaxExperienceMonths > 0 && parsed.MaxExperienceMonths < base.MaxExperienceMonths:
+		base.MaxExperienceMonths = parsed.MaxExperienceMonths
+	}
+	if base.MinExperienceMonths > 0 && base.MaxExperienceMonths > 0 && base.MinExperienceMonths > base.MaxExperienceMonths {
+		base.MaxExperienceMonths = base.MinExperienceMonths
+	}
+	return base
+}
+
+func mergeTextCondition(base string, parsed string) string {
+	base = strings.TrimSpace(base)
+	parsed = strings.TrimSpace(parsed)
+	if parsed == "" {
+		return base
+	}
+	if base == "" {
+		return parsed
+	}
+	if strings.EqualFold(base, parsed) {
+		return base
+	}
+	return base + " " + parsed
+}
+
+func mergeSkills(base []string, parsed []string, baseSkill string, parsedSkill string) []string {
+	combined := make([]string, 0, len(base)+len(parsed)+2)
+	combined = append(combined, base...)
+	combined = append(combined, parsed...)
+	if strings.TrimSpace(baseSkill) != "" {
+		combined = append(combined, baseSkill)
+	}
+	if strings.TrimSpace(parsedSkill) != "" {
+		combined = append(combined, parsedSkill)
+	}
+	seen := make(map[string]struct{}, len(combined))
+	out := make([]string, 0, len(combined))
+	for _, item := range combined {
+		value := strings.TrimSpace(item)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func mergeStatusConditions(base []resume.CandidateStatusLayer, parsed []resume.CandidateStatusLayer) []resume.CandidateStatusLayer {
+	if len(base) == 0 && len(parsed) == 0 {
+		return nil
+	}
+	seen := make(map[resume.CandidateStatusLayer]struct{}, len(base)+len(parsed))
+	out := make([]resume.CandidateStatusLayer, 0, len(base)+len(parsed))
+	for _, status := range base {
+		if _, ok := seen[status]; ok {
+			continue
+		}
+		seen[status] = struct{}{}
+		out = append(out, status)
+	}
+	for _, status := range parsed {
+		if _, ok := seen[status]; ok {
+			continue
+		}
+		seen[status] = struct{}{}
+		out = append(out, status)
+	}
+	return out
 }
 
 func (h *handler) createCandidate(c *gin.Context) {
