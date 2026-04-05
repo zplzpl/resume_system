@@ -485,6 +485,211 @@ func TestInterviewUpdateTriggersNotificationAndStatusLink(t *testing.T) {
 	}
 }
 
+func TestInterviewEvaluationSubmitArchiveAndCandidateLatestView(t *testing.T) {
+	router := mustRouter(t)
+	hrToken := signToken(t, "user_hr", "hr")
+
+	candidateID := uploadResumeAndGetCandidateID(t, router, hrToken, "eval_resume.pdf", "Name: Eval Candidate\nEmail: eval@example.com\nSkills: Go\n")
+	roundOneInterviewID := createInterview(t, router, hrToken, map[string]any{
+		"candidate_id":    candidateID,
+		"interviewer_ids": []string{"iv_eval_1", "iv_eval_2"},
+		"starts_at":       "2026-04-08T09:00:00Z",
+		"ends_at":         "2026-04-08T10:00:00Z",
+		"round":           "round-1",
+	})
+	roundTwoInterviewID := createInterview(t, router, hrToken, map[string]any{
+		"candidate_id":    candidateID,
+		"interviewer_ids": []string{"iv_eval_1"},
+		"starts_at":       "2026-04-10T09:00:00Z",
+		"ends_at":         "2026-04-10T10:00:00Z",
+		"round":           "round-2",
+	})
+
+	tokenEval1 := signToken(t, "iv_eval_1", "interviewer")
+	tokenEval2 := signToken(t, "iv_eval_2", "interviewer")
+
+	submitEvaluation(t, router, tokenEval1, roundOneInterviewID, map[string]any{
+		"capability_scores": []map[string]any{
+			{"dimension": "technical_depth", "score": 4, "comment": "solid backend fundamentals"},
+			{"dimension": "problem_solving", "score": 4, "comment": "good decomposition"},
+			{"dimension": "communication", "score": 3, "comment": "clear but concise"},
+			{"dimension": "collaboration", "score": 4, "comment": "works well with peers"},
+		},
+		"overall_comment": "first pass looks strong",
+		"conclusion":      "hire",
+	}, http.StatusOK)
+
+	submitEvaluation(t, router, tokenEval1, roundOneInterviewID, map[string]any{
+		"capability_scores": []map[string]any{
+			{"dimension": "technical_depth", "score": 5, "comment": "excellent depth"},
+			{"dimension": "problem_solving", "score": 4, "comment": "fast reasoning"},
+			{"dimension": "communication", "score": 4, "comment": "improved clarity"},
+			{"dimension": "collaboration", "score": 5, "comment": "strong ownership"},
+		},
+		"overall_comment": "updated after follow-up questions",
+		"conclusion":      "strong_hire",
+	}, http.StatusOK)
+
+	submitEvaluation(t, router, tokenEval2, roundOneInterviewID, map[string]any{
+		"capability_scores": []map[string]any{
+			{"dimension": "technical_depth", "score": 3, "comment": "ok depth"},
+			{"dimension": "problem_solving", "score": 3, "comment": "acceptable"},
+			{"dimension": "communication", "score": 4, "comment": "strong communication"},
+			{"dimension": "collaboration", "score": 4, "comment": "team fit"},
+		},
+		"overall_comment": "overall acceptable",
+		"conclusion":      "hold",
+	}, http.StatusOK)
+
+	submitEvaluation(t, router, tokenEval1, roundTwoInterviewID, map[string]any{
+		"capability_scores": []map[string]any{
+			{"dimension": "technical_depth", "score": 4, "comment": "stable"},
+			{"dimension": "problem_solving", "score": 5, "comment": "excellent on tradeoffs"},
+			{"dimension": "communication", "score": 4, "comment": "clear"},
+			{"dimension": "collaboration", "score": 4, "comment": "good leadership"},
+		},
+		"overall_comment": "second round confirmation",
+		"conclusion":      "hire",
+	}, http.StatusOK)
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/interviews/"+roundOneInterviewID+"/evaluations", nil)
+	listReq.Header.Set("Authorization", "Bearer "+hrToken)
+	listW := httptest.NewRecorder()
+	router.ServeHTTP(listW, listReq)
+
+	if listW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, listW.Code, listW.Body.String())
+	}
+
+	var listResp struct {
+		Items []struct {
+			InterviewerID string `json:"interviewer_id"`
+			Version       int    `json:"version"`
+			IsLatest      bool   `json:"is_latest"`
+			ArchivedAt    string `json:"archived_at"`
+			Conclusion    string `json:"conclusion"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(listW.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("unmarshal list response: %v", err)
+	}
+	if len(listResp.Items) != 3 {
+		t.Fatalf("expected 3 archive items, got %d", len(listResp.Items))
+	}
+
+	var latestCount int
+	for _, item := range listResp.Items {
+		if item.IsLatest {
+			latestCount++
+		}
+		if !item.IsLatest && item.ArchivedAt == "" {
+			t.Fatalf("expected archived_at on historical version, got empty for %+v", item)
+		}
+	}
+	if latestCount != 2 {
+		t.Fatalf("expected 2 latest records in round-1 interview, got %d", latestCount)
+	}
+
+	latestReq := httptest.NewRequest(http.MethodGet, "/api/v1/candidates/"+candidateID+"/evaluations/latest", nil)
+	latestReq.Header.Set("Authorization", "Bearer "+hrToken)
+	latestW := httptest.NewRecorder()
+	router.ServeHTTP(latestW, latestReq)
+	if latestW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, latestW.Code, latestW.Body.String())
+	}
+
+	var latestResp struct {
+		CandidateEvaluations struct {
+			CandidateID      string `json:"candidate_id"`
+			TotalLatestCount int    `json:"total_latest_count"`
+			Rounds           []struct {
+				Round       string `json:"round"`
+				Evaluations []struct {
+					IsLatest   bool   `json:"is_latest"`
+					Conclusion string `json:"conclusion"`
+				} `json:"evaluations"`
+			} `json:"rounds"`
+		} `json:"candidate_evaluations"`
+	}
+	if err := json.Unmarshal(latestW.Body.Bytes(), &latestResp); err != nil {
+		t.Fatalf("unmarshal latest response: %v", err)
+	}
+	if latestResp.CandidateEvaluations.CandidateID != candidateID {
+		t.Fatalf("expected candidate id %q, got %q", candidateID, latestResp.CandidateEvaluations.CandidateID)
+	}
+	if latestResp.CandidateEvaluations.TotalLatestCount != 3 {
+		t.Fatalf("expected 3 latest items, got %d", latestResp.CandidateEvaluations.TotalLatestCount)
+	}
+	if len(latestResp.CandidateEvaluations.Rounds) != 2 {
+		t.Fatalf("expected 2 rounds, got %d", len(latestResp.CandidateEvaluations.Rounds))
+	}
+	for _, round := range latestResp.CandidateEvaluations.Rounds {
+		for _, item := range round.Evaluations {
+			if !item.IsLatest {
+				t.Fatalf("expected only latest evaluations in candidate latest view")
+			}
+		}
+	}
+}
+
+func TestInterviewEvaluationValidationAndPermission(t *testing.T) {
+	router := mustRouter(t)
+	hrToken := signToken(t, "user_hr", "hr")
+	assignedInterviewerToken := signToken(t, "iv_assigned", "interviewer")
+	unassignedInterviewerToken := signToken(t, "iv_other", "interviewer")
+
+	candidateID := uploadResumeAndGetCandidateID(t, router, hrToken, "eval_validation.pdf", "Name: Validation Candidate\nEmail: validation@example.com\nSkills: Go\n")
+	interviewID := createInterview(t, router, hrToken, map[string]any{
+		"candidate_id":    candidateID,
+		"interviewer_ids": []string{"iv_assigned"},
+		"starts_at":       "2026-04-11T09:00:00Z",
+		"ends_at":         "2026-04-11T10:00:00Z",
+		"round":           "round-1",
+	})
+
+	forbiddenReqBody, _ := json.Marshal(map[string]any{
+		"capability_scores": []map[string]any{
+			{"dimension": "technical_depth", "score": 4},
+			{"dimension": "problem_solving", "score": 4},
+			{"dimension": "communication", "score": 4},
+			{"dimension": "collaboration", "score": 4},
+		},
+		"overall_comment": "not assigned interviewer",
+		"conclusion":      "hire",
+	})
+	forbiddenReq := httptest.NewRequest(http.MethodPost, "/api/v1/interviews/"+interviewID+"/evaluations", bytes.NewReader(forbiddenReqBody))
+	forbiddenReq.Header.Set("Authorization", "Bearer "+unassignedInterviewerToken)
+	forbiddenReq.Header.Set("Content-Type", "application/json")
+	forbiddenW := httptest.NewRecorder()
+	router.ServeHTTP(forbiddenW, forbiddenReq)
+	if forbiddenW.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusForbidden, forbiddenW.Code, forbiddenW.Body.String())
+	}
+	var forbiddenResp map[string]any
+	_ = json.Unmarshal(forbiddenW.Body.Bytes(), &forbiddenResp)
+	if forbiddenResp["code"] != httpx.UnauthorizedCode {
+		t.Fatalf("expected code %q, got %v", httpx.UnauthorizedCode, forbiddenResp["code"])
+	}
+
+	badTemplateReqBody, _ := json.Marshal(map[string]any{
+		"capability_scores": []map[string]any{
+			{"dimension": "technical_depth", "score": 6},
+			{"dimension": "problem_solving", "score": 4},
+			{"dimension": "communication", "score": 4},
+		},
+		"overall_comment": "bad template",
+		"conclusion":      "hire",
+	})
+	badTemplateReq := httptest.NewRequest(http.MethodPost, "/api/v1/interviews/"+interviewID+"/evaluations", bytes.NewReader(badTemplateReqBody))
+	badTemplateReq.Header.Set("Authorization", "Bearer "+assignedInterviewerToken)
+	badTemplateReq.Header.Set("Content-Type", "application/json")
+	badTemplateW := httptest.NewRecorder()
+	router.ServeHTTP(badTemplateW, badTemplateReq)
+	if badTemplateW.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadRequest, badTemplateW.Code, badTemplateW.Body.String())
+	}
+}
+
 func mustRouter(t *testing.T) http.Handler {
 	t.Helper()
 	cfg := config.Config{
@@ -591,6 +796,24 @@ func createInterview(t *testing.T, router http.Handler, token string, payload ma
 		t.Fatalf("expected notifications enqueued")
 	}
 	return resp.Interview.ID
+}
+
+func submitEvaluation(t *testing.T, router http.Handler, token, interviewID string, payload map[string]any, expectedStatus int) {
+	t.Helper()
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal evaluation payload: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/interviews/"+interviewID+"/evaluations", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != expectedStatus {
+		t.Fatalf("expected status %d, got %d body=%s", expectedStatus, w.Code, w.Body.String())
+	}
 }
 
 func assertCalendarCount(t *testing.T, body []byte, want int) {

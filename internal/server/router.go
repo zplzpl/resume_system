@@ -51,6 +51,18 @@ type updateInterviewRequest struct {
 	Note           *string   `json:"note"`
 }
 
+type capabilityScorePayload struct {
+	Dimension string `json:"dimension"`
+	Score     int    `json:"score"`
+	Comment   string `json:"comment"`
+}
+
+type submitInterviewEvaluationRequest struct {
+	CapabilityScores []capabilityScorePayload `json:"capability_scores"`
+	OverallComment   string                   `json:"overall_comment"`
+	Conclusion       string                   `json:"conclusion"`
+}
+
 func NewRouter(cfg config.Config) (*gin.Engine, error) {
 	if cfg.SupabaseJWTSecret == "" {
 		return nil, errors.New("SUPABASE_JWT_SECRET is required")
@@ -102,6 +114,9 @@ func NewRouter(cfg config.Config) (*gin.Engine, error) {
 		protected.POST("/interviews", auth.RequirePermission(rbac.ActionInterviewManage), h.createInterview)
 		protected.PATCH("/interviews/:id", auth.RequirePermission(rbac.ActionInterviewManage), h.updateInterview)
 		protected.GET("/interviews/calendar", auth.RequirePermission(rbac.ActionInterviewManage), h.getInterviewCalendar)
+		protected.POST("/interviews/:id/evaluations", auth.RequirePermission(rbac.ActionInterviewManage), h.submitInterviewEvaluation)
+		protected.GET("/interviews/:id/evaluations", auth.RequirePermission(rbac.ActionInterviewManage), h.listInterviewEvaluations)
+		protected.GET("/candidates/:id/evaluations/latest", auth.RequirePermission(rbac.ActionInterviewManage), h.getCandidateLatestEvaluations)
 		protected.GET("/admin/users", auth.RequirePermission(rbac.ActionUserManage), h.listUsers)
 	}
 
@@ -500,6 +515,79 @@ func (h *handler) getInterviewCalendar(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"calendar": h.interviewSvc.Calendar(view, anchor),
 	})
+}
+
+func (h *handler) submitInterviewEvaluation(c *gin.Context) {
+	user := auth.MustUser(c)
+	if user == nil {
+		httpx.AbortUnauthorized(c, http.StatusUnauthorized, "missing auth context")
+		return
+	}
+
+	var req submitInterviewEvaluationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "invalid request body"})
+		return
+	}
+
+	capabilityScores := make([]interview.CapabilityScore, 0, len(req.CapabilityScores))
+	for _, item := range req.CapabilityScores {
+		capabilityScores = append(capabilityScores, interview.CapabilityScore{
+			Dimension: item.Dimension,
+			Score:     item.Score,
+			Comment:   item.Comment,
+		})
+	}
+
+	result, err := h.interviewSvc.SubmitEvaluation(c.Param("id"), user.ID, interview.SubmitEvaluationRequest{
+		CapabilityScores: capabilityScores,
+		OverallComment:   req.OverallComment,
+		Conclusion:       req.Conclusion,
+	})
+	if err != nil {
+		switch {
+		case interview.IsInterviewNotFound(err):
+			c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": err.Error()})
+		case errors.Is(err, interview.ErrEvaluationInterviewerNotAssigned):
+			httpx.AbortUnauthorized(c, http.StatusForbidden, err.Error())
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"submitted":  true,
+		"evaluation": result,
+	})
+}
+
+func (h *handler) listInterviewEvaluations(c *gin.Context) {
+	evaluations, err := h.interviewSvc.ListEvaluations(c.Param("id"))
+	if err != nil {
+		if interview.IsInterviewNotFound(err) {
+			c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"interview_id": c.Param("id"),
+		"items":        evaluations,
+	})
+}
+
+func (h *handler) getCandidateLatestEvaluations(c *gin.Context) {
+	candidateID := strings.TrimSpace(c.Param("id"))
+	if !h.resumeSvc.CandidateExists(candidateID) {
+		c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": "candidate not found"})
+		return
+	}
+
+	view := h.interviewSvc.BuildCandidateLatestEvaluationsView(candidateID)
+	c.JSON(http.StatusOK, gin.H{"candidate_evaluations": view})
 }
 
 func parseCalendarAnchor(raw string) (time.Time, error) {

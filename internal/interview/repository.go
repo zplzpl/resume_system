@@ -8,16 +8,19 @@ import (
 )
 
 type MemoryRepository struct {
-	mu              sync.RWMutex
-	interviews      map[string]Interview
-	notificationLog []NotificationEvent
-	nextInterview   int64
-	nextEvent       int64
+	mu                sync.RWMutex
+	interviews        map[string]Interview
+	evaluationArchive map[string][]Evaluation
+	notificationLog   []NotificationEvent
+	nextInterview     int64
+	nextEvent         int64
+	nextEvaluation    int64
 }
 
 func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{
-		interviews: make(map[string]Interview),
+		interviews:        make(map[string]Interview),
+		evaluationArchive: make(map[string][]Evaluation),
 	}
 }
 
@@ -88,8 +91,94 @@ func (r *MemoryRepository) EnqueueNotifications(events []NotificationEvent) []No
 	return out
 }
 
+func (r *MemoryRepository) AddEvaluation(item Evaluation) Evaluation {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := time.Now().UTC()
+	archive := r.evaluationArchive[item.InterviewID]
+	version := 1
+	for i := range archive {
+		if archive[i].InterviewerID != item.InterviewerID {
+			continue
+		}
+		version++
+		if archive[i].IsLatest {
+			archivedAt := now
+			archive[i].IsLatest = false
+			archive[i].ArchivedAt = &archivedAt
+		}
+	}
+
+	r.nextEvaluation++
+	item.ID = fmt.Sprintf("eval_%06d", r.nextEvaluation)
+	item.Version = version
+	item.SubmittedAt = now
+	item.IsLatest = true
+	item.ArchivedAt = nil
+	item.CapabilityScores = cloneCapabilityScores(item.CapabilityScores)
+
+	archive = append(archive, item)
+	r.evaluationArchive[item.InterviewID] = archive
+	return cloneEvaluation(item)
+}
+
+func (r *MemoryRepository) ListEvaluationsByInterview(interviewID string) []Evaluation {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	archive := r.evaluationArchive[interviewID]
+	out := make([]Evaluation, 0, len(archive))
+	for _, item := range archive {
+		out = append(out, cloneEvaluation(item))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].SubmittedAt.Equal(out[j].SubmittedAt) {
+			return out[i].ID > out[j].ID
+		}
+		return out[i].SubmittedAt.After(out[j].SubmittedAt)
+	})
+	return out
+}
+
+func (r *MemoryRepository) ListLatestEvaluationsByCandidate(candidateID string) []Evaluation {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make([]Evaluation, 0)
+	for _, archive := range r.evaluationArchive {
+		for _, item := range archive {
+			if item.CandidateID != candidateID || !item.IsLatest {
+				continue
+			}
+			out = append(out, cloneEvaluation(item))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].SubmittedAt.Equal(out[j].SubmittedAt) {
+			return out[i].ID > out[j].ID
+		}
+		return out[i].SubmittedAt.After(out[j].SubmittedAt)
+	})
+	return out
+}
+
 func cloneInterview(in Interview) Interview {
 	out := in
 	out.InterviewerIDs = append([]string(nil), in.InterviewerIDs...)
 	return out
+}
+
+func cloneEvaluation(in Evaluation) Evaluation {
+	out := in
+	out.CapabilityScores = cloneCapabilityScores(in.CapabilityScores)
+	if in.ArchivedAt != nil {
+		archivedAt := *in.ArchivedAt
+		out.ArchivedAt = &archivedAt
+	}
+	return out
+}
+
+func cloneCapabilityScores(in []CapabilityScore) []CapabilityScore {
+	return append([]CapabilityScore(nil), in...)
 }
