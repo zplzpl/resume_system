@@ -24,7 +24,7 @@ func sampleGenerateRequest() GenerateRequest {
 				InterviewerID: "iv_2",
 				AverageScore:  4.0,
 				CapabilityScores: []CapabilityScore{
-					{Dimension: "collaboration", Score: 4, Comment: "good teammate"},
+					{Dimension: "communication", Score: 4, Comment: "good teammate"},
 					{Dimension: "technical_depth", Score: 4, Comment: "solid"},
 				},
 				OverallComment: "strong communication",
@@ -62,11 +62,77 @@ func TestGenerateContainsRequiredSections(t *testing.T) {
 	if len(report.Scores) == 0 {
 		t.Fatalf("expected scores to be present")
 	}
+	if len(report.DimensionComparisons) == 0 {
+		t.Fatalf("expected dimension comparisons to be present")
+	}
+	if len(report.RadarChart.Dimensions) == 0 || len(report.RadarChart.Series) == 0 {
+		t.Fatalf("expected radar chart data to be present")
+	}
 	if report.FinalComment == "" {
 		t.Fatalf("expected final comment to be present")
 	}
 	if report.HiringRecommendation == "" {
 		t.Fatalf("expected hiring recommendation to be present")
+	}
+}
+
+func TestGenerateDimensionComparisonAndRadarConsistency(t *testing.T) {
+	svc := NewService(nil)
+	report, err := svc.Generate(sampleGenerateRequest())
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+
+	var communication DimensionComparison
+	found := false
+	for _, cmp := range report.DimensionComparisons {
+		if cmp.Dimension == "communication" {
+			communication = cmp
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected communication comparison to exist")
+	}
+	if len(communication.Scores) != 2 {
+		t.Fatalf("expected communication dimension to include two interviewer scores, got %d", len(communication.Scores))
+	}
+	if communication.AverageScore != 4.0 || communication.HighestScore != 4.0 || communication.LowestScore != 4.0 {
+		t.Fatalf("unexpected communication comparison values: %#v", communication)
+	}
+
+	if len(report.RadarChart.Dimensions) != 3 {
+		t.Fatalf("expected radar chart to include three dimensions, got %d", len(report.RadarChart.Dimensions))
+	}
+	if len(report.RadarChart.Series) != len(report.Scores) {
+		t.Fatalf("expected one radar series per interviewer, got %d vs %d", len(report.RadarChart.Series), len(report.Scores))
+	}
+
+	scoreByInterviewerAndDimension := make(map[string]map[string]float64, len(report.Scores))
+	for _, interviewerScore := range report.Scores {
+		dims := make(map[string]float64, len(interviewerScore.CapabilityScores))
+		for _, dim := range interviewerScore.CapabilityScores {
+			dims[dim.Dimension] = float64(dim.Score)
+		}
+		scoreByInterviewerAndDimension[interviewerScore.InterviewerID] = dims
+	}
+
+	for _, radarSeries := range report.RadarChart.Series {
+		expectedByDimension, ok := scoreByInterviewerAndDimension[radarSeries.InterviewerID]
+		if !ok {
+			t.Fatalf("unexpected radar series interviewer id: %s", radarSeries.InterviewerID)
+		}
+		for _, value := range radarSeries.Values {
+			expected, exists := expectedByDimension[value.Dimension]
+			if !exists {
+				t.Fatalf("radar dimension %q not found in raw interviewer scores", value.Dimension)
+			}
+			if expected != value.Score {
+				t.Fatalf("radar score mismatch for interviewer=%s dimension=%s: got %.2f want %.2f",
+					radarSeries.InterviewerID, value.Dimension, value.Score, expected)
+			}
+		}
 	}
 }
 
@@ -121,6 +187,12 @@ func TestExportJSONAndMarkdown(t *testing.T) {
 	}
 	if !strings.Contains(string(markdownData), "## Score Details") {
 		t.Fatalf("expected markdown export to include score section")
+	}
+	if !strings.Contains(string(markdownData), "## Dimension Comparison") {
+		t.Fatalf("expected markdown export to include comparison section")
+	}
+	if !strings.Contains(string(markdownData), "## Radar Chart Data") {
+		t.Fatalf("expected markdown export to include radar section")
 	}
 }
 
