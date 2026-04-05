@@ -27,6 +27,8 @@ Supabase Auth + RBAC skeleton for resume system backend.
   - `POST /api/v1/interviews/:id/evaluations`
   - `GET /api/v1/interviews/:id/evaluations`
   - `GET /api/v1/candidates/:id/evaluations/latest`
+  - `POST /api/v1/candidates/:id/interview-report`
+  - `GET /api/v1/interview-reports/:id/export?format=json|markdown`
   - `GET /api/v1/admin/users`
 - Unified unauthorized response code (`UNAUTHORIZED`) for 401/403 cases
 - Resume upload/parse pipeline:
@@ -49,6 +51,11 @@ Supabase Auth + RBAC skeleton for resume system backend.
   - Validates score range (1-5) and conclusion enum (`strong_hire` / `hire` / `hold` / `no_hire`)
   - Stores versioned evaluation archives per interviewer/interview and marks latest records
   - Provides candidate-level latest evaluation view grouped by round for report generation
+- Structured interview report generation:
+  - One-click generation from candidate profile + latest evaluation archives
+  - Deterministic report ID and stable score ordering on repeated generation
+  - Includes candidate information, score details, interviewer comments, and hiring recommendation
+  - Supports JSON and Markdown export formats with explicit failure messages
 
 ## Environment Variables
 
