@@ -7,6 +7,7 @@ type Config struct {
 	SupabaseURL       string
 	SupabaseAnonKey   string
 	SupabaseJWTSecret string
+	ResumeStorageDir  string
 }
 
 func FromEnv() Config {
@@ -15,6 +16,7 @@ func FromEnv() Config {
 		SupabaseURL:       os.Getenv("SUPABASE_URL"),
 		SupabaseAnonKey:   os.Getenv("SUPABASE_ANON_KEY"),
 		SupabaseJWTSecret: os.Getenv("SUPABASE_JWT_SECRET"),
+		ResumeStorageDir:  getenv("RESUME_STORAGE_DIR", "./data/resumes"),
 	}
 }
 

@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -10,10 +11,18 @@ import (
 	"github.com/zplzpl/resume_system/internal/config"
 	"github.com/zplzpl/resume_system/internal/httpx"
 	"github.com/zplzpl/resume_system/internal/rbac"
+	"github.com/zplzpl/resume_system/internal/resume"
 )
 
 type handler struct {
 	authClient auth.Client
+	resumeSvc  *resume.Service
+}
+
+type createCandidateRequest struct {
+	FullName string `json:"full_name"`
+	Email    string `json:"email"`
+	Phone    string `json:"phone"`
 }
 
 func NewRouter(cfg config.Config) (*gin.Engine, error) {
@@ -21,8 +30,14 @@ func NewRouter(cfg config.Config) (*gin.Engine, error) {
 		return nil, errors.New("SUPABASE_JWT_SECRET is required")
 	}
 
+	storage, err := resume.NewLocalStorage(cfg.ResumeStorageDir)
+	if err != nil {
+		return nil, fmt.Errorf("init resume storage: %w", err)
+	}
+
 	h := &handler{
 		authClient: auth.NewSupabaseClient(cfg.SupabaseURL, cfg.SupabaseAnonKey),
+		resumeSvc:  resume.NewService(resume.NewMemoryRepository(), storage, resume.NewHeuristicParser()),
 	}
 
 	verifier, err := auth.NewJWTVerifier(cfg.SupabaseJWTSecret)
@@ -52,6 +67,10 @@ func NewRouter(cfg config.Config) (*gin.Engine, error) {
 		protected.GET("/me", h.me)
 		protected.GET("/candidates", auth.RequirePermission(rbac.ActionCandidateRead), h.listCandidates)
 		protected.POST("/candidates", auth.RequirePermission(rbac.ActionCandidateWrite), h.createCandidate)
+		protected.POST("/resumes/upload", auth.RequirePermission(rbac.ActionCandidateWrite), h.uploadResume)
+		protected.POST("/resumes/upload/batch", auth.RequirePermission(rbac.ActionCandidateWrite), h.uploadResumeBatch)
+		protected.GET("/resumes/:id", auth.RequirePermission(rbac.ActionCandidateRead), h.getResume)
+		protected.POST("/resumes/:id/retry", auth.RequirePermission(rbac.ActionCandidateWrite), h.retryResume)
 		protected.POST("/interviews", auth.RequirePermission(rbac.ActionInterviewManage), h.createInterview)
 		protected.GET("/admin/users", auth.RequirePermission(rbac.ActionUserManage), h.listUsers)
 	}
@@ -115,15 +134,148 @@ func (h *handler) me(c *gin.Context) {
 }
 
 func (h *handler) listCandidates(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"items": h.resumeSvc.ListCandidates()})
+}
+
+func (h *handler) createCandidate(c *gin.Context) {
+	var req createCandidateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "invalid request body"})
+		return
+	}
+
+	candidate := h.resumeSvc.CreateManualCandidate(req.FullName, req.Email, req.Phone)
+	c.JSON(http.StatusOK, gin.H{"created": true, "candidate": candidate})
+}
+
+func (h *handler) uploadResume(c *gin.Context) {
+	user := auth.MustUser(c)
+	if user == nil {
+		httpx.AbortUnauthorized(c, http.StatusUnauthorized, "missing auth context")
+		return
+	}
+
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "file is required"})
+		return
+	}
+
+	f, err := fileHeader.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": "UPLOAD_OPEN_FAILED", "message": err.Error()})
+		return
+	}
+	defer f.Close()
+
+	candidateID := strings.TrimSpace(c.PostForm("candidate_id"))
+	result, err := h.resumeSvc.Upload(fileHeader.Filename, f, user.ID, candidateID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": "UPLOAD_FAILED", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *handler) uploadResumeBatch(c *gin.Context) {
+	user := auth.MustUser(c)
+	if user == nil {
+		httpx.AbortUnauthorized(c, http.StatusUnauthorized, "missing auth context")
+		return
+	}
+
+	form, err := c.MultipartForm()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "invalid multipart form"})
+		return
+	}
+
+	files := form.File["files"]
+	if len(files) == 0 {
+		files = form.File["file"]
+	}
+	if len(files) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "at least one file is required"})
+		return
+	}
+
+	candidateID := strings.TrimSpace(c.PostForm("candidate_id"))
+	items := make([]gin.H, 0, len(files))
+	success := 0
+	failed := 0
+
+	for idx, fileHeader := range files {
+		f, openErr := fileHeader.Open()
+		if openErr != nil {
+			failed++
+			items = append(items, gin.H{
+				"index":     idx,
+				"file_name": fileHeader.Filename,
+				"error":     openErr.Error(),
+			})
+			continue
+		}
+
+		result, uploadErr := h.resumeSvc.Upload(fileHeader.Filename, f, user.ID, candidateID)
+		_ = f.Close()
+		if uploadErr != nil {
+			failed++
+			items = append(items, gin.H{
+				"index":     idx,
+				"file_name": fileHeader.Filename,
+				"error":     uploadErr.Error(),
+			})
+			continue
+		}
+
+		if result.Resume.ParseStatus == resume.ParseStatusSuccess {
+			success++
+		} else {
+			failed++
+		}
+
+		items = append(items, gin.H{
+			"index":     idx,
+			"file_name": fileHeader.Filename,
+			"resume":    result.Resume,
+			"candidate": result.Candidate,
+		})
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"items": []gin.H{
-			{"id": "cand_001", "name": "Alice"},
+		"items": items,
+		"summary": gin.H{
+			"total":   len(files),
+			"success": success,
+			"failed":  failed,
 		},
 	})
 }
 
-func (h *handler) createCandidate(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"created": true})
+func (h *handler) getResume(c *gin.Context) {
+	result, ok := h.resumeSvc.GetResume(c.Param("id"))
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": "resume not found"})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *handler) retryResume(c *gin.Context) {
+	result, err := h.resumeSvc.Retry(c.Param("id"))
+	if err != nil {
+		message := err.Error()
+		switch {
+		case strings.Contains(message, "not found"):
+			c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": message})
+		case strings.Contains(message, "not in failed status"):
+			c.JSON(http.StatusConflict, gin.H{"code": "INVALID_STATUS", "message": message})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": message})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, result)
 }
 
 func (h *handler) createInterview(c *gin.Context) {
