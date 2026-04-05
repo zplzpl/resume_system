@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/zplzpl/resume_system/internal/audit"
+	"github.com/zplzpl/resume_system/internal/auth"
 	"github.com/zplzpl/resume_system/internal/config"
 	"github.com/zplzpl/resume_system/internal/httpx"
 )
@@ -960,6 +963,207 @@ func TestInterviewQuestionRecommendationFallback(t *testing.T) {
 	assertQuestionCategoryCoverage(t, resp.Recommendation.Questions)
 }
 
+func TestLoginAndResumeDeleteAreAudited(t *testing.T) {
+	router := mustRouterWithAuthClient(t, &stubAuthClient{
+		passwordLoginResp: &auth.Session{
+			AccessToken:  "access_1",
+			TokenType:    "bearer",
+			ExpiresIn:    3600,
+			RefreshToken: "refresh_1",
+			User: map[string]any{
+				"id":    "auth_user_1",
+				"email": "hr@example.com",
+			},
+		},
+	})
+
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"email":"hr@example.com","password":"pass"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginW := httptest.NewRecorder()
+	router.ServeHTTP(loginW, loginReq)
+	if loginW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, loginW.Code, loginW.Body.String())
+	}
+
+	hrToken := signToken(t, "user_hr", "hr")
+	_, resumeID := uploadResumeAndGetIDs(t, router, hrToken, "to_delete.pdf", "Name: To Delete\nEmail: delete@example.com\nSkills: Go\n")
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/resumes/"+resumeID, nil)
+	deleteReq.Header.Set("Authorization", "Bearer "+hrToken)
+	deleteW := httptest.NewRecorder()
+	router.ServeHTTP(deleteW, deleteReq)
+	if deleteW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, deleteW.Code, deleteW.Body.String())
+	}
+
+	loginAuditReq := httptest.NewRequest(http.MethodGet, "/api/v1/audit-logs?action_type="+audit.ActionAuthLogin+"&operator_id=auth_user_1", nil)
+	loginAuditReq.Header.Set("Authorization", "Bearer "+hrToken)
+	loginAuditW := httptest.NewRecorder()
+	router.ServeHTTP(loginAuditW, loginAuditReq)
+	if loginAuditW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, loginAuditW.Code, loginAuditW.Body.String())
+	}
+	var loginAuditResp struct {
+		Items []struct {
+			ActionType string `json:"action_type"`
+			OperatorID string `json:"operator_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(loginAuditW.Body.Bytes(), &loginAuditResp); err != nil {
+		t.Fatalf("unmarshal login audit response: %v", err)
+	}
+	if len(loginAuditResp.Items) != 1 {
+		t.Fatalf("expected 1 login audit record, got %d", len(loginAuditResp.Items))
+	}
+	if loginAuditResp.Items[0].ActionType != audit.ActionAuthLogin {
+		t.Fatalf("unexpected action type: %q", loginAuditResp.Items[0].ActionType)
+	}
+	if loginAuditResp.Items[0].OperatorID != "auth_user_1" {
+		t.Fatalf("unexpected operator_id: %q", loginAuditResp.Items[0].OperatorID)
+	}
+
+	deleteAuditReq := httptest.NewRequest(http.MethodGet, "/api/v1/audit-logs?action_type="+audit.ActionResumeDelete+"&object_id="+resumeID, nil)
+	deleteAuditReq.Header.Set("Authorization", "Bearer "+hrToken)
+	deleteAuditW := httptest.NewRecorder()
+	router.ServeHTTP(deleteAuditW, deleteAuditReq)
+	if deleteAuditW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, deleteAuditW.Code, deleteAuditW.Body.String())
+	}
+	var deleteAuditResp struct {
+		Items []struct {
+			ActionType string            `json:"action_type"`
+			OperatorID string            `json:"operator_id"`
+			ObjectID   string            `json:"object_id"`
+			Metadata   map[string]string `json:"metadata"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(deleteAuditW.Body.Bytes(), &deleteAuditResp); err != nil {
+		t.Fatalf("unmarshal delete audit response: %v", err)
+	}
+	if len(deleteAuditResp.Items) != 1 {
+		t.Fatalf("expected 1 delete audit record, got %d", len(deleteAuditResp.Items))
+	}
+	if deleteAuditResp.Items[0].ActionType != audit.ActionResumeDelete {
+		t.Fatalf("unexpected action type: %q", deleteAuditResp.Items[0].ActionType)
+	}
+	if deleteAuditResp.Items[0].OperatorID != "user_hr" {
+		t.Fatalf("unexpected operator_id: %q", deleteAuditResp.Items[0].OperatorID)
+	}
+	if deleteAuditResp.Items[0].ObjectID != resumeID {
+		t.Fatalf("unexpected object_id: %q", deleteAuditResp.Items[0].ObjectID)
+	}
+}
+
+func TestEvaluationModificationIsAuditedAndFilterable(t *testing.T) {
+	router := mustRouter(t)
+	hrToken := signToken(t, "user_hr", "hr")
+	interviewerToken := signToken(t, "iv_eval_mod", "interviewer")
+
+	candidateID := uploadResumeAndGetCandidateID(t, router, hrToken, "eval_mod_resume.pdf", "Name: Eval Mod\nEmail: eval_mod@example.com\nSkills: Go\n")
+	interviewID := createInterview(t, router, hrToken, map[string]any{
+		"candidate_id":    candidateID,
+		"interviewer_ids": []string{"iv_eval_mod"},
+		"starts_at":       "2026-04-15T09:00:00Z",
+		"ends_at":         "2026-04-15T10:00:00Z",
+		"round":           "round-1",
+	})
+
+	submitEvaluation(t, router, interviewerToken, interviewID, map[string]any{
+		"capability_scores": []map[string]any{
+			{"dimension": "technical_depth", "score": 4, "comment": "good"},
+			{"dimension": "problem_solving", "score": 4, "comment": "good"},
+			{"dimension": "communication", "score": 4, "comment": "good"},
+			{"dimension": "collaboration", "score": 4, "comment": "good"},
+		},
+		"overall_comment": "first version",
+		"conclusion":      "hire",
+	}, http.StatusOK)
+	submitEvaluation(t, router, interviewerToken, interviewID, map[string]any{
+		"capability_scores": []map[string]any{
+			{"dimension": "technical_depth", "score": 5, "comment": "better"},
+			{"dimension": "problem_solving", "score": 4, "comment": "stable"},
+			{"dimension": "communication", "score": 4, "comment": "clear"},
+			{"dimension": "collaboration", "score": 5, "comment": "strong"},
+		},
+		"overall_comment": "second version",
+		"conclusion":      "strong_hire",
+	}, http.StatusOK)
+
+	modifyReq := httptest.NewRequest(http.MethodGet, "/api/v1/audit-logs?action_type="+audit.ActionInterviewEvaluationModify+"&operator_id=iv_eval_mod", nil)
+	modifyReq.Header.Set("Authorization", "Bearer "+hrToken)
+	modifyW := httptest.NewRecorder()
+	router.ServeHTTP(modifyW, modifyReq)
+	if modifyW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, modifyW.Code, modifyW.Body.String())
+	}
+	var modifyResp struct {
+		Items []struct {
+			ActionType string            `json:"action_type"`
+			Metadata   map[string]string `json:"metadata"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(modifyW.Body.Bytes(), &modifyResp); err != nil {
+		t.Fatalf("unmarshal modify audit response: %v", err)
+	}
+	if len(modifyResp.Items) != 1 {
+		t.Fatalf("expected 1 modify audit record, got %d", len(modifyResp.Items))
+	}
+	if modifyResp.Items[0].ActionType != audit.ActionInterviewEvaluationModify {
+		t.Fatalf("unexpected action type: %q", modifyResp.Items[0].ActionType)
+	}
+	if modifyResp.Items[0].Metadata["version"] != "2" {
+		t.Fatalf("expected version=2 metadata, got %+v", modifyResp.Items[0].Metadata)
+	}
+
+	submitReq := httptest.NewRequest(http.MethodGet, "/api/v1/audit-logs?action_type="+audit.ActionInterviewEvaluationSubmit+"&operator_id=iv_eval_mod", nil)
+	submitReq.Header.Set("Authorization", "Bearer "+hrToken)
+	submitW := httptest.NewRecorder()
+	router.ServeHTTP(submitW, submitReq)
+	if submitW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, submitW.Code, submitW.Body.String())
+	}
+	var submitResp struct {
+		Items []struct {
+			Metadata map[string]string `json:"metadata"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(submitW.Body.Bytes(), &submitResp); err != nil {
+		t.Fatalf("unmarshal submit audit response: %v", err)
+	}
+	if len(submitResp.Items) != 1 {
+		t.Fatalf("expected 1 submit audit record, got %d", len(submitResp.Items))
+	}
+	if submitResp.Items[0].Metadata["version"] != "1" {
+		t.Fatalf("expected version=1 metadata, got %+v", submitResp.Items[0].Metadata)
+	}
+
+	forbiddenReq := httptest.NewRequest(http.MethodGet, "/api/v1/audit-logs", nil)
+	forbiddenReq.Header.Set("Authorization", "Bearer "+interviewerToken)
+	forbiddenW := httptest.NewRecorder()
+	router.ServeHTTP(forbiddenW, forbiddenReq)
+	if forbiddenW.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusForbidden, forbiddenW.Code, forbiddenW.Body.String())
+	}
+
+	fromFuture := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339)
+	emptyReq := httptest.NewRequest(http.MethodGet, "/api/v1/audit-logs?action_type="+audit.ActionInterviewEvaluationModify+"&from="+fromFuture, nil)
+	emptyReq.Header.Set("Authorization", "Bearer "+hrToken)
+	emptyW := httptest.NewRecorder()
+	router.ServeHTTP(emptyW, emptyReq)
+	if emptyW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, emptyW.Code, emptyW.Body.String())
+	}
+	var emptyResp struct {
+		Items []any `json:"items"`
+	}
+	if err := json.Unmarshal(emptyW.Body.Bytes(), &emptyResp); err != nil {
+		t.Fatalf("unmarshal empty audit response: %v", err)
+	}
+	if len(emptyResp.Items) != 0 {
+		t.Fatalf("expected empty result for future window, got %d", len(emptyResp.Items))
+	}
+}
+
 func mustRouter(t *testing.T) http.Handler {
 	t.Helper()
 	cfg := config.Config{
@@ -974,7 +1178,27 @@ func mustRouter(t *testing.T) http.Handler {
 	return router
 }
 
+func mustRouterWithAuthClient(t *testing.T, authClient auth.Client) http.Handler {
+	t.Helper()
+	cfg := config.Config{
+		Port:              "8080",
+		SupabaseJWTSecret: "test-secret",
+		ResumeStorageDir:  t.TempDir(),
+	}
+	router, err := newRouterWithAuthClient(cfg, authClient)
+	if err != nil {
+		t.Fatalf("new router with auth client: %v", err)
+	}
+	return router
+}
+
 func uploadResumeAndGetCandidateID(t *testing.T, router http.Handler, token, fileName, content string) string {
+	t.Helper()
+	candidateID, _ := uploadResumeAndGetIDs(t, router, token, fileName, content)
+	return candidateID
+}
+
+func uploadResumeAndGetIDs(t *testing.T, router http.Handler, token, fileName, content string) (string, string) {
 	t.Helper()
 
 	req := newMultipartRequest(t, http.MethodPost, "/api/v1/resumes/upload", nil, []multipartFile{
@@ -993,6 +1217,7 @@ func uploadResumeAndGetCandidateID(t *testing.T, router http.Handler, token, fil
 			ID string `json:"id"`
 		} `json:"candidate"`
 		Resume struct {
+			ID          string `json:"id"`
 			ParseStatus string `json:"parse_status"`
 		} `json:"resume"`
 	}
@@ -1005,7 +1230,10 @@ func uploadResumeAndGetCandidateID(t *testing.T, router http.Handler, token, fil
 	if resp.Candidate.ID == "" {
 		t.Fatalf("expected candidate id from upload response")
 	}
-	return resp.Candidate.ID
+	if resp.Resume.ID == "" {
+		t.Fatalf("expected resume id from upload response")
+	}
+	return resp.Candidate.ID, resp.Resume.ID
 }
 
 func updateCandidateStatusLayer(t *testing.T, router http.Handler, token, candidateID, status string) {
@@ -1180,4 +1408,24 @@ func newMultipartRequest(t *testing.T, method, target string, fields map[string]
 	req := httptest.NewRequest(method, target, &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	return req
+}
+
+type stubAuthClient struct {
+	passwordLoginResp *auth.Session
+	passwordLoginErr  error
+	refreshResp       *auth.Session
+	refreshErr        error
+	logoutErr         error
+}
+
+func (s *stubAuthClient) PasswordLogin(ctx context.Context, email, password string) (*auth.Session, error) {
+	return s.passwordLoginResp, s.passwordLoginErr
+}
+
+func (s *stubAuthClient) Refresh(ctx context.Context, refreshToken string) (*auth.Session, error) {
+	return s.refreshResp, s.refreshErr
+}
+
+func (s *stubAuthClient) Logout(ctx context.Context, accessToken string) error {
+	return s.logoutErr
 }

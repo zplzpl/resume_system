@@ -15,6 +15,7 @@ const (
 	ActionCandidateWrite  Action = "candidate:write"
 	ActionInterviewManage Action = "interview:manage"
 	ActionUserManage      Action = "user:manage"
+	ActionAuditRead       Action = "audit:read"
 )
 
 var rolePermissions = map[Role]map[Action]struct{}{
@@ -23,11 +24,13 @@ var rolePermissions = map[Role]map[Action]struct{}{
 		ActionCandidateWrite:  {},
 		ActionInterviewManage: {},
 		ActionUserManage:      {},
+		ActionAuditRead:       {},
 	},
 	RoleHR: {
 		ActionCandidateRead:   {},
 		ActionCandidateWrite:  {},
 		ActionInterviewManage: {},
+		ActionAuditRead:       {},
 	},
 	RoleInterviewer: {
 		ActionCandidateRead:   {},

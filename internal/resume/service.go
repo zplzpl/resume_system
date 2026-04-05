@@ -79,6 +79,21 @@ func (s *Service) GetResume(id string) (UploadResult, bool) {
 	return result, true
 }
 
+func (s *Service) DeleteResume(id string) (ResumeRecord, error) {
+	id = strings.TrimSpace(id)
+	record, ok := s.repo.GetResume(id)
+	if !ok {
+		return ResumeRecord{}, fmt.Errorf("%w: %s", ErrResumeNotFound, id)
+	}
+	if err := s.storage.Delete(record.StoragePath); err != nil {
+		return ResumeRecord{}, err
+	}
+	if ok := s.repo.DeleteResume(id); !ok {
+		return ResumeRecord{}, fmt.Errorf("%w: %s", ErrResumeNotFound, id)
+	}
+	return record, nil
+}
+
 func (s *Service) ListCandidates() []CandidateProfile {
 	return s.SearchCandidates(CandidateSearchOptions{})
 }
@@ -160,4 +175,8 @@ func IsCandidateNotFound(err error) bool {
 
 func IsInvalidStatusLayer(err error) bool {
 	return errors.Is(err, ErrInvalidStatusLayer)
+}
+
+func IsResumeNotFound(err error) bool {
+	return errors.Is(err, ErrResumeNotFound)
 }

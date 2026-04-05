@@ -56,6 +56,17 @@ func (r *MemoryRepository) GetResume(id string) (ResumeRecord, bool) {
 	return cloneResume(record), true
 }
 
+func (r *MemoryRepository) DeleteResume(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, ok := r.resumes[id]; !ok {
+		return false
+	}
+	delete(r.resumes, id)
+	return true
+}
+
 func (r *MemoryRepository) UpsertCandidate(candidateID string, parsed ParsedCoreFields, sourceResumeID string) CandidateProfile {
 	r.mu.Lock()
 	defer r.mu.Unlock()

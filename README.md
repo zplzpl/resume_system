@@ -20,6 +20,7 @@ Supabase Auth + RBAC skeleton for resume system backend.
   - `POST /api/v1/resumes/upload`
   - `POST /api/v1/resumes/upload/batch`
   - `GET /api/v1/resumes/:id`
+  - `DELETE /api/v1/resumes/:id`
   - `POST /api/v1/resumes/:id/retry`
   - `POST /api/v1/interviews`
   - `PATCH /api/v1/interviews/:id`
@@ -31,6 +32,7 @@ Supabase Auth + RBAC skeleton for resume system backend.
   - `GET /api/v1/candidates/:id/evaluations/latest`
   - `POST /api/v1/candidates/:id/interview-report`
   - `GET /api/v1/interview-reports/:id/export?format=json|markdown`
+  - `GET /api/v1/audit-logs`
   - `GET /api/v1/admin/users`
 - Unified unauthorized response code (`UNAUTHORIZED`) for 401/403 cases
 - Resume upload/parse pipeline:
@@ -58,6 +60,10 @@ Supabase Auth + RBAC skeleton for resume system backend.
   - Deterministic report ID and stable score ordering on repeated generation
   - Includes candidate information, score details, interviewer comments, and hiring recommendation
   - Supports JSON and Markdown export formats with explicit failure messages
+- Audit logging:
+  - Automatically records key operations (`auth.login`, `auth.logout`, `resume.delete`, `interview.evaluation.submit`, `interview.evaluation.modify`)
+  - Includes operator, operation time, object type, object id, and operation metadata
+  - Supports filtered query by action/operator/object/time window via `GET /api/v1/audit-logs`
 
 ## Environment Variables
 
