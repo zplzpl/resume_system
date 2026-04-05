@@ -25,6 +25,10 @@ type createCandidateRequest struct {
 	Phone    string `json:"phone"`
 }
 
+type updateCandidateStatusLayerRequest struct {
+	StatusLayer string `json:"status_layer"`
+}
+
 func NewRouter(cfg config.Config) (*gin.Engine, error) {
 	if cfg.SupabaseJWTSecret == "" {
 		return nil, errors.New("SUPABASE_JWT_SECRET is required")
@@ -67,6 +71,7 @@ func NewRouter(cfg config.Config) (*gin.Engine, error) {
 		protected.GET("/me", h.me)
 		protected.GET("/candidates", auth.RequirePermission(rbac.ActionCandidateRead), h.listCandidates)
 		protected.POST("/candidates", auth.RequirePermission(rbac.ActionCandidateWrite), h.createCandidate)
+		protected.PATCH("/candidates/:id/status-layer", auth.RequirePermission(rbac.ActionCandidateWrite), h.updateCandidateStatusLayer)
 		protected.POST("/resumes/upload", auth.RequirePermission(rbac.ActionCandidateWrite), h.uploadResume)
 		protected.POST("/resumes/upload/batch", auth.RequirePermission(rbac.ActionCandidateWrite), h.uploadResumeBatch)
 		protected.GET("/resumes/:id", auth.RequirePermission(rbac.ActionCandidateRead), h.getResume)
@@ -134,7 +139,22 @@ func (h *handler) me(c *gin.Context) {
 }
 
 func (h *handler) listCandidates(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"items": h.resumeSvc.ListCandidates()})
+	statusParams := append([]string{}, c.QueryArray("status_layer")...)
+	statusParams = append(statusParams, c.QueryArray("status")...)
+	statusList, err := resume.ParseCandidateStatusLayers(statusParams)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		return
+	}
+
+	options := resume.CandidateSearchOptions{
+		Keyword:    strings.TrimSpace(c.Query("keyword")),
+		Skill:      strings.TrimSpace(c.Query("skill")),
+		Company:    strings.TrimSpace(c.Query("company")),
+		School:     strings.TrimSpace(c.Query("school")),
+		StatusList: statusList,
+	}
+	c.JSON(http.StatusOK, gin.H{"items": h.resumeSvc.SearchCandidates(options)})
 }
 
 func (h *handler) createCandidate(c *gin.Context) {
@@ -146,6 +166,29 @@ func (h *handler) createCandidate(c *gin.Context) {
 
 	candidate := h.resumeSvc.CreateManualCandidate(req.FullName, req.Email, req.Phone)
 	c.JSON(http.StatusOK, gin.H{"created": true, "candidate": candidate})
+}
+
+func (h *handler) updateCandidateStatusLayer(c *gin.Context) {
+	var req updateCandidateStatusLayerRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "invalid request body"})
+		return
+	}
+
+	candidate, err := h.resumeSvc.UpdateCandidateStatusLayer(c.Param("id"), req.StatusLayer)
+	if err != nil {
+		switch {
+		case resume.IsCandidateNotFound(err):
+			c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": err.Error()})
+		case resume.IsInvalidStatusLayer(err):
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"updated": true, "candidate": candidate})
 }
 
 func (h *handler) uploadResume(c *gin.Context) {

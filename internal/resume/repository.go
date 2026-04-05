@@ -3,6 +3,7 @@ package resume
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -68,6 +69,7 @@ func (r *MemoryRepository) UpsertCandidate(candidateID string, parsed ParsedCore
 		r.nextCandidateSeq++
 		candidate.ID = fmt.Sprintf("cand_%06d", r.nextCandidateSeq)
 		candidate.CreatedAt = now
+		candidate.StatusLayer = CandidateStatusNew
 	}
 	candidate.UpdatedAt = now
 	candidate.FullName = chooseValue(parsed.FullName, candidate.FullName, "Unknown Candidate")
@@ -84,6 +86,9 @@ func (r *MemoryRepository) UpsertCandidate(candidateID string, parsed ParsedCore
 		candidate.Skills = append([]string(nil), parsed.Skills...)
 	}
 	candidate.SourceResumeID = sourceResumeID
+	if candidate.StatusLayer == "" {
+		candidate.StatusLayer = CandidateStatusNew
+	}
 	r.candidates[candidate.ID] = cloneCandidate(candidate)
 	return cloneCandidate(candidate)
 }
@@ -95,23 +100,53 @@ func (r *MemoryRepository) CreateCandidate(name, email, phone string) CandidateP
 	r.nextCandidateSeq++
 	now := time.Now().UTC()
 	candidate := CandidateProfile{
-		ID:        fmt.Sprintf("cand_%06d", r.nextCandidateSeq),
-		FullName:  chooseValue(name, "", "Unknown Candidate"),
-		Email:     email,
-		Phone:     phone,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:          fmt.Sprintf("cand_%06d", r.nextCandidateSeq),
+		FullName:    chooseValue(name, "", "Unknown Candidate"),
+		Email:       email,
+		Phone:       phone,
+		StatusLayer: CandidateStatusNew,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 	r.candidates[candidate.ID] = cloneCandidate(candidate)
 	return cloneCandidate(candidate)
 }
 
 func (r *MemoryRepository) ListCandidates() []CandidateProfile {
+	return r.SearchCandidates(CandidateSearchOptions{})
+}
+
+func (r *MemoryRepository) SearchCandidates(options CandidateSearchOptions) []CandidateProfile {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	items := make([]CandidateProfile, 0, len(r.candidates))
+	statusSet := make(map[CandidateStatusLayer]struct{}, len(options.StatusList))
+	for _, status := range options.StatusList {
+		statusSet[status] = struct{}{}
+	}
+	keyword := strings.ToLower(strings.TrimSpace(options.Keyword))
+	skill := strings.ToLower(strings.TrimSpace(options.Skill))
+	company := strings.ToLower(strings.TrimSpace(options.Company))
+	school := strings.ToLower(strings.TrimSpace(options.School))
 	for _, candidate := range r.candidates {
+		if len(statusSet) > 0 {
+			if _, ok := statusSet[candidate.StatusLayer]; !ok {
+				continue
+			}
+		}
+		if keyword != "" && !matchesAnyCandidateField(candidate, keyword) {
+			continue
+		}
+		if skill != "" && !containsSkill(candidate.Skills, skill) {
+			continue
+		}
+		if company != "" && !strings.Contains(strings.ToLower(candidate.CurrentCompany), company) {
+			continue
+		}
+		if school != "" && !strings.Contains(strings.ToLower(candidate.HighestEducation), school) {
+			continue
+		}
 		items = append(items, cloneCandidate(candidate))
 	}
 	sort.Slice(items, func(i, j int) bool {
@@ -121,6 +156,31 @@ func (r *MemoryRepository) ListCandidates() []CandidateProfile {
 		return items[i].CreatedAt.Before(items[j].CreatedAt)
 	})
 	return items
+}
+
+func (r *MemoryRepository) GetCandidate(id string) (CandidateProfile, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	candidate, ok := r.candidates[id]
+	if !ok {
+		return CandidateProfile{}, false
+	}
+	return cloneCandidate(candidate), true
+}
+
+func (r *MemoryRepository) UpdateCandidateStatusLayer(id string, status CandidateStatusLayer) (CandidateProfile, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	candidate, ok := r.candidates[id]
+	if !ok {
+		return CandidateProfile{}, false
+	}
+	candidate.StatusLayer = status
+	candidate.UpdatedAt = time.Now().UTC()
+	r.candidates[id] = cloneCandidate(candidate)
+	return cloneCandidate(candidate), true
 }
 
 func cloneResume(in ResumeRecord) ResumeRecord {
@@ -143,4 +203,31 @@ func chooseValue(primary, fallback, defaultValue string) string {
 		return fallback
 	}
 	return defaultValue
+}
+
+func matchesAnyCandidateField(candidate CandidateProfile, keyword string) bool {
+	if containsSkill(candidate.Skills, keyword) {
+		return true
+	}
+	searchFields := []string{
+		candidate.FullName,
+		candidate.Email,
+		candidate.CurrentCompany,
+		candidate.HighestEducation,
+	}
+	for _, field := range searchFields {
+		if strings.Contains(strings.ToLower(field), keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSkill(skills []string, keyword string) bool {
+	for _, skill := range skills {
+		if strings.Contains(strings.ToLower(skill), keyword) {
+			return true
+		}
+	}
+	return false
 }

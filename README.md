@@ -14,8 +14,9 @@ Supabase Auth + RBAC skeleton for resume system backend.
   - `hr`
   - `interviewer`
 - Core protected APIs with permission checks:
-  - `GET /api/v1/candidates`
+  - `GET /api/v1/candidates` (supports combined filters: `keyword`/`skill`/`company`/`school` + `status_layer`)
   - `POST /api/v1/candidates`
+  - `PATCH /api/v1/candidates/:id/status-layer`
   - `POST /api/v1/resumes/upload`
   - `POST /api/v1/resumes/upload/batch`
   - `GET /api/v1/resumes/:id`
@@ -29,6 +30,10 @@ Supabase Auth + RBAC skeleton for resume system backend.
   - Parses core fields into candidate profile (`full_name`, `email`, `phone`, company/title, education, location, skills, experience months)
   - Tracks parse status (`pending`/`processing`/`success`/`failed`) with failure reason
   - Provides retry endpoint for failed files
+- Candidate status layering:
+  - Default status layer: `new`
+  - Supported layers: `new` / `screening` / `interview` / `offer` / `hired` / `archived`
+  - Status-layer filtering supports multiple values (e.g. `?status_layer=screening&status_layer=interview`)
 
 ## Environment Variables
 
