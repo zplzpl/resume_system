@@ -5,18 +5,21 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/zplzpl/resume_system/internal/auth"
 	"github.com/zplzpl/resume_system/internal/config"
 	"github.com/zplzpl/resume_system/internal/httpx"
+	"github.com/zplzpl/resume_system/internal/interview"
 	"github.com/zplzpl/resume_system/internal/rbac"
 	"github.com/zplzpl/resume_system/internal/resume"
 )
 
 type handler struct {
-	authClient auth.Client
-	resumeSvc  *resume.Service
+	authClient   auth.Client
+	resumeSvc    *resume.Service
+	interviewSvc *interview.Service
 }
 
 type createCandidateRequest struct {
@@ -27,6 +30,25 @@ type createCandidateRequest struct {
 
 type updateCandidateStatusLayerRequest struct {
 	StatusLayer string `json:"status_layer"`
+}
+
+type createInterviewRequest struct {
+	CandidateID    string   `json:"candidate_id"`
+	InterviewerIDs []string `json:"interviewer_ids"`
+	StartsAt       string   `json:"starts_at"`
+	EndsAt         string   `json:"ends_at"`
+	Round          string   `json:"round"`
+	Note           string   `json:"note"`
+}
+
+type updateInterviewRequest struct {
+	CandidateID    *string   `json:"candidate_id"`
+	InterviewerIDs *[]string `json:"interviewer_ids"`
+	StartsAt       *string   `json:"starts_at"`
+	EndsAt         *string   `json:"ends_at"`
+	Round          *string   `json:"round"`
+	Status         *string   `json:"status"`
+	Note           *string   `json:"note"`
 }
 
 func NewRouter(cfg config.Config) (*gin.Engine, error) {
@@ -40,8 +62,9 @@ func NewRouter(cfg config.Config) (*gin.Engine, error) {
 	}
 
 	h := &handler{
-		authClient: auth.NewSupabaseClient(cfg.SupabaseURL, cfg.SupabaseAnonKey),
-		resumeSvc:  resume.NewService(resume.NewMemoryRepository(), storage, resume.NewHeuristicParser()),
+		authClient:   auth.NewSupabaseClient(cfg.SupabaseURL, cfg.SupabaseAnonKey),
+		resumeSvc:    resume.NewService(resume.NewMemoryRepository(), storage, resume.NewHeuristicParser()),
+		interviewSvc: interview.NewService(interview.NewMemoryRepository()),
 	}
 
 	verifier, err := auth.NewJWTVerifier(cfg.SupabaseJWTSecret)
@@ -77,6 +100,8 @@ func NewRouter(cfg config.Config) (*gin.Engine, error) {
 		protected.GET("/resumes/:id", auth.RequirePermission(rbac.ActionCandidateRead), h.getResume)
 		protected.POST("/resumes/:id/retry", auth.RequirePermission(rbac.ActionCandidateWrite), h.retryResume)
 		protected.POST("/interviews", auth.RequirePermission(rbac.ActionInterviewManage), h.createInterview)
+		protected.PATCH("/interviews/:id", auth.RequirePermission(rbac.ActionInterviewManage), h.updateInterview)
+		protected.GET("/interviews/calendar", auth.RequirePermission(rbac.ActionInterviewManage), h.getInterviewCalendar)
 		protected.GET("/admin/users", auth.RequirePermission(rbac.ActionUserManage), h.listUsers)
 	}
 
@@ -322,7 +347,174 @@ func (h *handler) retryResume(c *gin.Context) {
 }
 
 func (h *handler) createInterview(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"scheduled": true})
+	var req createInterviewRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "invalid request body"})
+		return
+	}
+
+	if !h.resumeSvc.CandidateExists(req.CandidateID) {
+		c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": "candidate not found"})
+		return
+	}
+
+	startsAt, err := time.Parse(time.RFC3339, strings.TrimSpace(req.StartsAt))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "starts_at must be RFC3339"})
+		return
+	}
+	endsAt, err := time.Parse(time.RFC3339, strings.TrimSpace(req.EndsAt))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "ends_at must be RFC3339"})
+		return
+	}
+
+	user := auth.MustUser(c)
+	createdBy := ""
+	if user != nil {
+		createdBy = user.ID
+	}
+
+	result, err := h.interviewSvc.Create(interview.CreateRequest{
+		CandidateID:    req.CandidateID,
+		InterviewerIDs: req.InterviewerIDs,
+		StartsAt:       startsAt,
+		EndsAt:         endsAt,
+		Round:          req.Round,
+		Note:           req.Note,
+		CreatedBy:      createdBy,
+	})
+	if err != nil {
+		switch {
+		case interview.IsConflictError(err):
+			conflictErr := interview.ExtractConflictError(err)
+			c.JSON(http.StatusConflict, gin.H{
+				"code":      "SCHEDULE_CONFLICT",
+				"message":   err.Error(),
+				"conflicts": conflictErr.Conflicts,
+			})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		}
+		return
+	}
+
+	candidate, statusErr := h.resumeSvc.UpdateCandidateStatusLayer(result.Interview.CandidateID, string(resume.CandidateStatusInterview))
+	if statusErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": "STATUS_LINK_FAILED", "message": statusErr.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"scheduled":              true,
+		"interview":              result.Interview,
+		"notifications":          result.Notifications,
+		"notifications_enqueued": result.NotificationsEnqueued,
+		"candidate":              candidate,
+	})
+}
+
+func (h *handler) updateInterview(c *gin.Context) {
+	var req updateInterviewRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "invalid request body"})
+		return
+	}
+
+	if req.CandidateID != nil && !h.resumeSvc.CandidateExists(*req.CandidateID) {
+		c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": "candidate not found"})
+		return
+	}
+
+	updateReq := interview.UpdateRequest{
+		CandidateID:    req.CandidateID,
+		InterviewerIDs: req.InterviewerIDs,
+		Round:          req.Round,
+		Status:         req.Status,
+		Note:           req.Note,
+	}
+
+	if req.StartsAt != nil {
+		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(*req.StartsAt))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "starts_at must be RFC3339"})
+			return
+		}
+		updateReq.StartsAt = &parsed
+	}
+	if req.EndsAt != nil {
+		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(*req.EndsAt))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "ends_at must be RFC3339"})
+			return
+		}
+		updateReq.EndsAt = &parsed
+	}
+
+	result, err := h.interviewSvc.Update(c.Param("id"), updateReq)
+	if err != nil {
+		switch {
+		case interview.IsInterviewNotFound(err):
+			c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": err.Error()})
+		case interview.IsConflictError(err):
+			conflictErr := interview.ExtractConflictError(err)
+			c.JSON(http.StatusConflict, gin.H{
+				"code":      "SCHEDULE_CONFLICT",
+				"message":   err.Error(),
+				"conflicts": conflictErr.Conflicts,
+			})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		}
+		return
+	}
+
+	candidate, statusErr := h.resumeSvc.UpdateCandidateStatusLayer(result.Interview.CandidateID, string(resume.CandidateStatusInterview))
+	if statusErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": "STATUS_LINK_FAILED", "message": statusErr.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"updated":                true,
+		"interview":              result.Interview,
+		"notifications":          result.Notifications,
+		"notifications_enqueued": result.NotificationsEnqueued,
+		"candidate":              candidate,
+	})
+}
+
+func (h *handler) getInterviewCalendar(c *gin.Context) {
+	view, err := interview.ParseCalendarView(c.Query("view"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		return
+	}
+
+	anchor, err := parseCalendarAnchor(c.Query("date"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"calendar": h.interviewSvc.Calendar(view, anchor),
+	})
+}
+
+func parseCalendarAnchor(raw string) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Now().UTC(), nil
+	}
+
+	if t, err := time.Parse("2006-01-02", raw); err == nil {
+		return t.UTC(), nil
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t.UTC(), nil
+	}
+	return time.Time{}, fmt.Errorf("date must be YYYY-MM-DD or RFC3339")
 }
 
 func (h *handler) listUsers(c *gin.Context) {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/zplzpl/resume_system/internal/config"
@@ -356,6 +357,134 @@ func TestCandidateStatusLayerValidation(t *testing.T) {
 	}
 }
 
+func TestInterviewSchedulingConflictAndCalendarViews(t *testing.T) {
+	router := mustRouter(t)
+	token := signToken(t, "user_hr", "hr")
+
+	candidateA := uploadResumeAndGetCandidateID(t, router, token, "schedule_a.pdf", "Name: Candidate A\nEmail: a@example.com\nSkills: Go\n")
+	candidateB := uploadResumeAndGetCandidateID(t, router, token, "schedule_b.pdf", "Name: Candidate B\nEmail: b@example.com\nSkills: Go\n")
+
+	firstInterviewID := createInterview(t, router, token, map[string]any{
+		"candidate_id":    candidateA,
+		"interviewer_ids": []string{"iv_1", "iv_2"},
+		"starts_at":       "2026-04-06T09:00:00Z",
+		"ends_at":         "2026-04-06T10:00:00Z",
+		"round":           "round-1",
+	})
+	if firstInterviewID == "" {
+		t.Fatalf("expected interview id")
+	}
+
+	conflictSameCandidateReq := httptest.NewRequest(http.MethodPost, "/api/v1/interviews", strings.NewReader(`{"candidate_id":"`+candidateA+`","interviewer_ids":["iv_3"],"starts_at":"2026-04-06T09:30:00Z","ends_at":"2026-04-06T10:30:00Z"}`))
+	conflictSameCandidateReq.Header.Set("Authorization", "Bearer "+token)
+	conflictSameCandidateReq.Header.Set("Content-Type", "application/json")
+	conflictSameCandidateW := httptest.NewRecorder()
+	router.ServeHTTP(conflictSameCandidateW, conflictSameCandidateReq)
+	if conflictSameCandidateW.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusConflict, conflictSameCandidateW.Code, conflictSameCandidateW.Body.String())
+	}
+	if !strings.Contains(conflictSameCandidateW.Body.String(), "candidate_time_conflict") {
+		t.Fatalf("expected candidate conflict, got %s", conflictSameCandidateW.Body.String())
+	}
+
+	conflictInterviewerReq := httptest.NewRequest(http.MethodPost, "/api/v1/interviews", strings.NewReader(`{"candidate_id":"`+candidateB+`","interviewer_ids":["iv_1"],"starts_at":"2026-04-06T09:40:00Z","ends_at":"2026-04-06T10:20:00Z"}`))
+	conflictInterviewerReq.Header.Set("Authorization", "Bearer "+token)
+	conflictInterviewerReq.Header.Set("Content-Type", "application/json")
+	conflictInterviewerW := httptest.NewRecorder()
+	router.ServeHTTP(conflictInterviewerW, conflictInterviewerReq)
+	if conflictInterviewerW.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusConflict, conflictInterviewerW.Code, conflictInterviewerW.Body.String())
+	}
+	if !strings.Contains(conflictInterviewerW.Body.String(), "interviewer_time_conflict") {
+		t.Fatalf("expected interviewer conflict, got %s", conflictInterviewerW.Body.String())
+	}
+
+	secondInterviewID := createInterview(t, router, token, map[string]any{
+		"candidate_id":    candidateB,
+		"interviewer_ids": []string{"iv_3"},
+		"starts_at":       "2026-04-07T11:00:00Z",
+		"ends_at":         "2026-04-07T12:00:00Z",
+		"round":           "round-2",
+	})
+	if secondInterviewID == "" {
+		t.Fatalf("expected second interview id")
+	}
+
+	dayReq := httptest.NewRequest(http.MethodGet, "/api/v1/interviews/calendar?view=day&date=2026-04-06", nil)
+	dayReq.Header.Set("Authorization", "Bearer "+token)
+	dayW := httptest.NewRecorder()
+	router.ServeHTTP(dayW, dayReq)
+	if dayW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, dayW.Code, dayW.Body.String())
+	}
+	assertCalendarCount(t, dayW.Body.Bytes(), 1)
+
+	weekReq := httptest.NewRequest(http.MethodGet, "/api/v1/interviews/calendar?view=week&date=2026-04-06", nil)
+	weekReq.Header.Set("Authorization", "Bearer "+token)
+	weekW := httptest.NewRecorder()
+	router.ServeHTTP(weekW, weekReq)
+	if weekW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, weekW.Code, weekW.Body.String())
+	}
+	assertCalendarCount(t, weekW.Body.Bytes(), 2)
+
+	monthReq := httptest.NewRequest(http.MethodGet, "/api/v1/interviews/calendar?view=month&date=2026-04-01", nil)
+	monthReq.Header.Set("Authorization", "Bearer "+token)
+	monthW := httptest.NewRecorder()
+	router.ServeHTTP(monthW, monthReq)
+	if monthW.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, monthW.Code, monthW.Body.String())
+	}
+	assertCalendarCount(t, monthW.Body.Bytes(), 2)
+}
+
+func TestInterviewUpdateTriggersNotificationAndStatusLink(t *testing.T) {
+	router := mustRouter(t)
+	token := signToken(t, "user_hr", "hr")
+
+	candidateID := uploadResumeAndGetCandidateID(t, router, token, "schedule_update.pdf", "Name: Candidate Update\nEmail: update@example.com\nSkills: Go\n")
+	interviewID := createInterview(t, router, token, map[string]any{
+		"candidate_id":    candidateID,
+		"interviewer_ids": []string{"iv_9"},
+		"starts_at":       "2026-04-06T13:00:00Z",
+		"ends_at":         "2026-04-06T14:00:00Z",
+		"round":           "round-1",
+	})
+
+	updatePayload := `{"starts_at":"2026-04-06T15:00:00Z","ends_at":"2026-04-06T16:00:00Z","note":"rescheduled by hr"}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/interviews/"+interviewID, strings.NewReader(updatePayload))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		NotificationsEnqueued int `json:"notifications_enqueued"`
+		Interview             struct {
+			Status string `json:"status"`
+		} `json:"interview"`
+		Candidate struct {
+			StatusLayer string `json:"status_layer"`
+		} `json:"candidate"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Interview.Status != "rescheduled" {
+		t.Fatalf("expected status rescheduled, got %q", resp.Interview.Status)
+	}
+	if resp.NotificationsEnqueued != 4 {
+		t.Fatalf("expected 4 notifications, got %d", resp.NotificationsEnqueued)
+	}
+	if resp.Candidate.StatusLayer != "interview" {
+		t.Fatalf("expected candidate status_layer interview, got %q", resp.Candidate.StatusLayer)
+	}
+}
+
 func mustRouter(t *testing.T) http.Handler {
 	t.Helper()
 	cfg := config.Config{
@@ -415,6 +544,76 @@ func updateCandidateStatusLayer(t *testing.T, router http.Handler, token, candid
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, w.Code, w.Body.String())
+	}
+}
+
+func createInterview(t *testing.T, router http.Handler, token string, payload map[string]any) string {
+	t.Helper()
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/interviews", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		NotificationsEnqueued int `json:"notifications_enqueued"`
+		Interview             struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"interview"`
+		Candidate struct {
+			StatusLayer string `json:"status_layer"`
+		} `json:"candidate"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal create interview response: %v", err)
+	}
+	if resp.Interview.ID == "" {
+		t.Fatalf("expected interview id in response")
+	}
+	if resp.Interview.Status != "scheduled" {
+		t.Fatalf("expected interview status scheduled, got %q", resp.Interview.Status)
+	}
+	if resp.Candidate.StatusLayer != "interview" {
+		t.Fatalf("expected candidate status_layer interview, got %q", resp.Candidate.StatusLayer)
+	}
+	if resp.NotificationsEnqueued == 0 {
+		t.Fatalf("expected notifications enqueued")
+	}
+	return resp.Interview.ID
+}
+
+func assertCalendarCount(t *testing.T, body []byte, want int) {
+	t.Helper()
+	var resp struct {
+		Calendar struct {
+			View      string `json:"view"`
+			RangeFrom string `json:"range_from"`
+			RangeTo   string `json:"range_to"`
+			Items     []any  `json:"items"`
+		} `json:"calendar"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("unmarshal calendar response: %v", err)
+	}
+	if _, err := time.Parse(time.RFC3339, resp.Calendar.RangeFrom); err != nil {
+		t.Fatalf("invalid range_from: %v", err)
+	}
+	if _, err := time.Parse(time.RFC3339, resp.Calendar.RangeTo); err != nil {
+		t.Fatalf("invalid range_to: %v", err)
+	}
+	if len(resp.Calendar.Items) != want {
+		t.Fatalf("expected %d items, got %d", want, len(resp.Calendar.Items))
 	}
 }
 

@@ -95,6 +95,11 @@ func (s *Service) CreateManualCandidate(name, email, phone string) CandidateProf
 	return s.repo.CreateCandidate(strings.TrimSpace(name), strings.TrimSpace(email), strings.TrimSpace(phone))
 }
 
+func (s *Service) CandidateExists(candidateID string) bool {
+	_, ok := s.repo.GetCandidate(strings.TrimSpace(candidateID))
+	return ok
+}
+
 func (s *Service) UpdateCandidateStatusLayer(candidateID, statusRaw string) (CandidateProfile, error) {
 	status, err := ParseCandidateStatusLayer(statusRaw)
 	if err != nil {
