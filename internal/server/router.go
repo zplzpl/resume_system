@@ -65,6 +65,11 @@ type submitInterviewEvaluationRequest struct {
 	Conclusion       string                   `json:"conclusion"`
 }
 
+type generateInterviewQuestionRecommendationRequest struct {
+	JobTitle       string `json:"job_title"`
+	JobDescription string `json:"job_description"`
+}
+
 func NewRouter(cfg config.Config) (*gin.Engine, error) {
 	if cfg.SupabaseJWTSecret == "" {
 		return nil, errors.New("SUPABASE_JWT_SECRET is required")
@@ -119,6 +124,8 @@ func NewRouter(cfg config.Config) (*gin.Engine, error) {
 		protected.GET("/interviews/calendar", auth.RequirePermission(rbac.ActionInterviewManage), h.getInterviewCalendar)
 		protected.POST("/interviews/:id/evaluations", auth.RequirePermission(rbac.ActionInterviewManage), h.submitInterviewEvaluation)
 		protected.GET("/interviews/:id/evaluations", auth.RequirePermission(rbac.ActionInterviewManage), h.listInterviewEvaluations)
+		protected.POST("/interviews/:id/question-recommendations", auth.RequirePermission(rbac.ActionInterviewManage), h.generateInterviewQuestionRecommendation)
+		protected.GET("/interviews/:id/question-recommendations", auth.RequirePermission(rbac.ActionInterviewManage), h.getInterviewQuestionRecommendation)
 		protected.GET("/candidates/:id/evaluations/latest", auth.RequirePermission(rbac.ActionInterviewManage), h.getCandidateLatestEvaluations)
 		protected.POST("/candidates/:id/interview-report", auth.RequirePermission(rbac.ActionInterviewManage), h.generateInterviewReport)
 		protected.GET("/interview-reports/:id/export", auth.RequirePermission(rbac.ActionInterviewManage), h.exportInterviewReport)
@@ -593,6 +600,78 @@ func (h *handler) getCandidateLatestEvaluations(c *gin.Context) {
 
 	view := h.interviewSvc.BuildCandidateLatestEvaluationsView(candidateID)
 	c.JSON(http.StatusOK, gin.H{"candidate_evaluations": view})
+}
+
+func (h *handler) generateInterviewQuestionRecommendation(c *gin.Context) {
+	var req generateInterviewQuestionRecommendationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": "invalid request body"})
+		return
+	}
+
+	item, err := h.interviewSvc.GetInterview(c.Param("id"))
+	if err != nil {
+		if interview.IsInterviewNotFound(err) {
+			c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		return
+	}
+
+	candidate, ok := h.resumeSvc.GetCandidate(item.CandidateID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": "candidate not found"})
+		return
+	}
+
+	recommendation, err := h.interviewSvc.GenerateQuestionRecommendation(item.ID, interview.CandidateSnapshot{
+		ID:                    candidate.ID,
+		FullName:              candidate.FullName,
+		CurrentCompany:        candidate.CurrentCompany,
+		CurrentTitle:          candidate.CurrentTitle,
+		HighestEducation:      candidate.HighestEducation,
+		TotalExperienceMonths: candidate.TotalExperienceMonths,
+		Skills:                candidate.Skills,
+	}, interview.GenerateQuestionRecommendationRequest{
+		JobTitle:       req.JobTitle,
+		JobDescription: req.JobDescription,
+	})
+	if err != nil {
+		switch {
+		case interview.IsInterviewNotFound(err):
+			c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": err.Error()})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"generated":       true,
+		"recommendation":  recommendation,
+		"candidate":       candidate,
+		"interview_round": item.Round,
+	})
+}
+
+func (h *handler) getInterviewQuestionRecommendation(c *gin.Context) {
+	recommendation, err := h.interviewSvc.GetQuestionRecommendation(c.Param("id"))
+	if err != nil {
+		switch {
+		case interview.IsInterviewNotFound(err):
+			c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": err.Error()})
+		case interview.IsQuestionRecommendationNotFound(err):
+			c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": err.Error()})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"code": "BAD_REQUEST", "message": err.Error()})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"recommendation": recommendation,
+	})
 }
 
 func (h *handler) generateInterviewReport(c *gin.Context) {
