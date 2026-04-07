@@ -67,6 +67,19 @@ func TestGenerateAndExportFlow(t *testing.T) {
 	if !strings.Contains(exportW.Body.String(), "Hiring Recommendation") {
 		t.Fatalf("expected markdown export body")
 	}
+
+	csvReq := httptest.NewRequest(http.MethodGet, "/api/reports/"+generated.ReportID+"/export?format=csv", nil)
+	csvW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(csvW, csvReq)
+	if csvW.Code != http.StatusOK {
+		t.Fatalf("csv export status = %d, body=%s", csvW.Code, csvW.Body.String())
+	}
+	if !strings.Contains(csvW.Header().Get("Content-Type"), "text/csv") {
+		t.Fatalf("expected text/csv content type, got %s", csvW.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(csvW.Body.String(), "candidate_name") {
+		t.Fatalf("expected csv export header row")
+	}
 }
 
 func TestGenerateInvalidJSON(t *testing.T) {

@@ -2,6 +2,7 @@ package report
 
 import (
 	"context"
+	"encoding/csv"
 	"errors"
 	"strings"
 	"testing"
@@ -92,7 +93,7 @@ func TestGenerateDeterministicIDAndFieldOrder(t *testing.T) {
 	}
 }
 
-func TestExportJSONAndMarkdown(t *testing.T) {
+func TestExportJSONMarkdownAndCSV(t *testing.T) {
 	svc := NewService(fixedClock)
 	generated, err := svc.Generate(context.Background(), sampleRequest())
 	if err != nil {
@@ -119,6 +120,28 @@ func TestExportJSONAndMarkdown(t *testing.T) {
 	}
 	if !strings.Contains(string(mdData), "## Interview Scores") {
 		t.Fatalf("expected markdown export to include score section")
+	}
+
+	_, csvType, csvData, err := svc.Export(generated.ReportID, "csv")
+	if err != nil {
+		t.Fatalf("Export(csv) error = %v", err)
+	}
+	if !strings.Contains(csvType, "text/csv") {
+		t.Fatalf("unexpected csv type: %s", csvType)
+	}
+	reader := csv.NewReader(strings.NewReader(string(csvData)))
+	rows, err := reader.ReadAll()
+	if err != nil {
+		t.Fatalf("failed to parse csv: %v", err)
+	}
+	if len(rows) < 2 {
+		t.Fatalf("expected header + at least one data row")
+	}
+	if rows[0][0] != "report_id" {
+		t.Fatalf("unexpected csv header: %#v", rows[0])
+	}
+	if rows[1][4] != "Jane Doe" {
+		t.Fatalf("expected candidate_name in csv row, got %#v", rows[1])
 	}
 }
 

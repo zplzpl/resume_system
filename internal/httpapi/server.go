@@ -105,7 +105,7 @@ func (s *Server) handleExportReport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, report.ErrUnsupportedExportFormat) {
-			writeError(w, http.StatusBadRequest, "UNSUPPORTED_EXPORT_FORMAT", "format must be one of: json, markdown, md", map[string]interface{}{
+			writeError(w, http.StatusBadRequest, "UNSUPPORTED_EXPORT_FORMAT", "format must be one of: json, markdown, md, csv", map[string]interface{}{
 				"format": format,
 			})
 			return

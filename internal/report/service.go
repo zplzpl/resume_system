@@ -1,13 +1,16 @@
 package report
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -95,6 +98,12 @@ func (s *Service) Export(reportID, format string) (fileName string, contentType 
 	case "markdown", "md":
 		md := buildMarkdown(report)
 		return fmt.Sprintf("interview-report-%s.md", reportID), "text/markdown; charset=utf-8", []byte(md), nil
+	case "csv":
+		csvData, csvErr := buildCSV(report)
+		if csvErr != nil {
+			return "", "", nil, csvErr
+		}
+		return fmt.Sprintf("interview-report-%s.csv", reportID), "text/csv; charset=utf-8", csvData, nil
 	default:
 		return "", "", nil, fmt.Errorf("%w: %s", ErrUnsupportedExportFormat, format)
 	}
@@ -245,6 +254,71 @@ func buildMarkdown(report StructuredInterviewReport) string {
 	b.WriteString(report.FinalComment)
 	b.WriteString("\n")
 	return b.String()
+}
+
+func buildCSV(report StructuredInterviewReport) ([]byte, error) {
+	var b bytes.Buffer
+	w := csv.NewWriter(&b)
+
+	header := []string{
+		"report_id",
+		"generated_at",
+		"generated_by",
+		"candidate_id",
+		"candidate_name",
+		"candidate_email",
+		"candidate_phone",
+		"candidate_position",
+		"hiring_recommendation",
+		"average_score",
+		"interview_id",
+		"interviewer_id",
+		"interviewer_name",
+		"overall_score",
+		"dimension_name",
+		"dimension_score",
+		"dimension_comment",
+		"summary",
+		"final_comment",
+	}
+	if err := w.Write(header); err != nil {
+		return nil, err
+	}
+
+	for _, score := range report.Scores {
+		for _, dim := range score.Dimensions {
+			row := []string{
+				report.ReportID,
+				report.GeneratedAt.Format(time.RFC3339),
+				report.GeneratedBy,
+				report.Candidate.ID,
+				report.Candidate.Name,
+				report.Candidate.Email,
+				report.Candidate.Phone,
+				report.Candidate.Position,
+				report.HiringRecommendation,
+				strconv.FormatFloat(report.AverageScore, 'f', 2, 64),
+				score.InterviewID,
+				score.InterviewerID,
+				score.InterviewerName,
+				strconv.FormatFloat(score.OverallScore, 'f', 2, 64),
+				dim.Name,
+				strconv.FormatFloat(dim.Score, 'f', 2, 64),
+				dim.Comment,
+				score.Summary,
+				report.FinalComment,
+			}
+			if err := w.Write(row); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	w.Flush()
+	if err := w.Error(); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
 }
 
 func escapePipe(in string) string {
