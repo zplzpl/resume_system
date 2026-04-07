@@ -1,9 +1,11 @@
 package report
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
-	"encoding/csv"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -93,7 +95,7 @@ func TestGenerateDeterministicIDAndFieldOrder(t *testing.T) {
 	}
 }
 
-func TestExportJSONMarkdownAndCSV(t *testing.T) {
+func TestExportJSONMarkdownAndXLSX(t *testing.T) {
 	svc := NewService(fixedClock)
 	generated, err := svc.Generate(context.Background(), sampleRequest())
 	if err != nil {
@@ -122,26 +124,44 @@ func TestExportJSONMarkdownAndCSV(t *testing.T) {
 		t.Fatalf("expected markdown export to include score section")
 	}
 
-	_, csvType, csvData, err := svc.Export(generated.ReportID, "csv")
+	_, xlsxType, xlsxData, err := svc.Export(generated.ReportID, "xlsx")
 	if err != nil {
-		t.Fatalf("Export(csv) error = %v", err)
+		t.Fatalf("Export(xlsx) error = %v", err)
 	}
-	if !strings.Contains(csvType, "text/csv") {
-		t.Fatalf("unexpected csv type: %s", csvType)
+	if !strings.Contains(xlsxType, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") {
+		t.Fatalf("unexpected xlsx type: %s", xlsxType)
 	}
-	reader := csv.NewReader(strings.NewReader(string(csvData)))
-	rows, err := reader.ReadAll()
+
+	reader, err := zip.NewReader(bytes.NewReader(xlsxData), int64(len(xlsxData)))
 	if err != nil {
-		t.Fatalf("failed to parse csv: %v", err)
+		t.Fatalf("failed to parse xlsx zip: %v", err)
 	}
-	if len(rows) < 2 {
-		t.Fatalf("expected header + at least one data row")
+
+	var sheetXML string
+	for _, f := range reader.File {
+		if f.Name != "xl/worksheets/sheet1.xml" {
+			continue
+		}
+		rc, openErr := f.Open()
+		if openErr != nil {
+			t.Fatalf("failed to open worksheet xml: %v", openErr)
+		}
+		data, readErr := io.ReadAll(rc)
+		_ = rc.Close()
+		if readErr != nil {
+			t.Fatalf("failed to read worksheet xml: %v", readErr)
+		}
+		sheetXML = string(data)
+		break
 	}
-	if rows[0][0] != "report_id" {
-		t.Fatalf("unexpected csv header: %#v", rows[0])
+	if sheetXML == "" {
+		t.Fatalf("worksheet xml not found in xlsx")
 	}
-	if rows[1][4] != "Jane Doe" {
-		t.Fatalf("expected candidate_name in csv row, got %#v", rows[1])
+	if !strings.Contains(sheetXML, "candidate_name") {
+		t.Fatalf("expected xlsx header row")
+	}
+	if !strings.Contains(sheetXML, "Jane Doe") {
+		t.Fatalf("expected candidate_name in xlsx row")
 	}
 }
 

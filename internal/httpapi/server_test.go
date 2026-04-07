@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -68,17 +70,38 @@ func TestGenerateAndExportFlow(t *testing.T) {
 		t.Fatalf("expected markdown export body")
 	}
 
-	csvReq := httptest.NewRequest(http.MethodGet, "/api/reports/"+generated.ReportID+"/export?format=csv", nil)
-	csvW := httptest.NewRecorder()
-	server.Handler().ServeHTTP(csvW, csvReq)
-	if csvW.Code != http.StatusOK {
-		t.Fatalf("csv export status = %d, body=%s", csvW.Code, csvW.Body.String())
+	xlsxReq := httptest.NewRequest(http.MethodGet, "/api/reports/"+generated.ReportID+"/export?format=xlsx", nil)
+	xlsxW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(xlsxW, xlsxReq)
+	if xlsxW.Code != http.StatusOK {
+		t.Fatalf("xlsx export status = %d, body=%s", xlsxW.Code, xlsxW.Body.String())
 	}
-	if !strings.Contains(csvW.Header().Get("Content-Type"), "text/csv") {
-		t.Fatalf("expected text/csv content type, got %s", csvW.Header().Get("Content-Type"))
+	if !strings.Contains(xlsxW.Header().Get("Content-Type"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") {
+		t.Fatalf("expected xlsx content type, got %s", xlsxW.Header().Get("Content-Type"))
 	}
-	if !strings.Contains(csvW.Body.String(), "candidate_name") {
-		t.Fatalf("expected csv export header row")
+	reader, err := zip.NewReader(bytes.NewReader(xlsxW.Body.Bytes()), int64(xlsxW.Body.Len()))
+	if err != nil {
+		t.Fatalf("failed to parse xlsx zip: %v", err)
+	}
+	var sheetXML string
+	for _, f := range reader.File {
+		if f.Name != "xl/worksheets/sheet1.xml" {
+			continue
+		}
+		rc, openErr := f.Open()
+		if openErr != nil {
+			t.Fatalf("failed to open worksheet xml: %v", openErr)
+		}
+		data, readErr := io.ReadAll(rc)
+		_ = rc.Close()
+		if readErr != nil {
+			t.Fatalf("failed to read worksheet xml: %v", readErr)
+		}
+		sheetXML = string(data)
+		break
+	}
+	if !strings.Contains(sheetXML, "candidate_name") {
+		t.Fatalf("expected xlsx export header row")
 	}
 }
 

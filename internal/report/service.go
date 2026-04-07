@@ -1,16 +1,16 @@
 package report
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -98,12 +98,12 @@ func (s *Service) Export(reportID, format string) (fileName string, contentType 
 	case "markdown", "md":
 		md := buildMarkdown(report)
 		return fmt.Sprintf("interview-report-%s.md", reportID), "text/markdown; charset=utf-8", []byte(md), nil
-	case "csv":
-		csvData, csvErr := buildCSV(report)
-		if csvErr != nil {
-			return "", "", nil, csvErr
+	case "xlsx":
+		xlsxData, xlsxErr := buildXLSX(report)
+		if xlsxErr != nil {
+			return "", "", nil, xlsxErr
 		}
-		return fmt.Sprintf("interview-report-%s.csv", reportID), "text/csv; charset=utf-8", csvData, nil
+		return fmt.Sprintf("interview-report-%s.xlsx", reportID), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", xlsxData, nil
 	default:
 		return "", "", nil, fmt.Errorf("%w: %s", ErrUnsupportedExportFormat, format)
 	}
@@ -256,38 +256,34 @@ func buildMarkdown(report StructuredInterviewReport) string {
 	return b.String()
 }
 
-func buildCSV(report StructuredInterviewReport) ([]byte, error) {
-	var b bytes.Buffer
-	w := csv.NewWriter(&b)
-
-	header := []string{
-		"report_id",
-		"generated_at",
-		"generated_by",
-		"candidate_id",
-		"candidate_name",
-		"candidate_email",
-		"candidate_phone",
-		"candidate_position",
-		"hiring_recommendation",
-		"average_score",
-		"interview_id",
-		"interviewer_id",
-		"interviewer_name",
-		"overall_score",
-		"dimension_name",
-		"dimension_score",
-		"dimension_comment",
-		"summary",
-		"final_comment",
-	}
-	if err := w.Write(header); err != nil {
-		return nil, err
+func buildXLSX(report StructuredInterviewReport) ([]byte, error) {
+	rows := [][]string{
+		{
+			"report_id",
+			"generated_at",
+			"generated_by",
+			"candidate_id",
+			"candidate_name",
+			"candidate_email",
+			"candidate_phone",
+			"candidate_position",
+			"hiring_recommendation",
+			"average_score",
+			"interview_id",
+			"interviewer_id",
+			"interviewer_name",
+			"overall_score",
+			"dimension_name",
+			"dimension_score",
+			"dimension_comment",
+			"summary",
+			"final_comment",
+		},
 	}
 
 	for _, score := range report.Scores {
 		for _, dim := range score.Dimensions {
-			row := []string{
+			rows = append(rows, []string{
 				report.ReportID,
 				report.GeneratedAt.Format(time.RFC3339),
 				report.GeneratedBy,
@@ -297,28 +293,94 @@ func buildCSV(report StructuredInterviewReport) ([]byte, error) {
 				report.Candidate.Phone,
 				report.Candidate.Position,
 				report.HiringRecommendation,
-				strconv.FormatFloat(report.AverageScore, 'f', 2, 64),
+				fmt.Sprintf("%.2f", report.AverageScore),
 				score.InterviewID,
 				score.InterviewerID,
 				score.InterviewerName,
-				strconv.FormatFloat(score.OverallScore, 'f', 2, 64),
+				fmt.Sprintf("%.2f", score.OverallScore),
 				dim.Name,
-				strconv.FormatFloat(dim.Score, 'f', 2, 64),
+				fmt.Sprintf("%.2f", dim.Score),
 				dim.Comment,
 				score.Summary,
 				report.FinalComment,
-			}
-			if err := w.Write(row); err != nil {
-				return nil, err
-			}
+			})
 		}
 	}
 
-	w.Flush()
-	if err := w.Error(); err != nil {
+	var workbook bytes.Buffer
+	archive := zip.NewWriter(&workbook)
+	writeEntry := func(name, content string) error {
+		f, err := archive.Create(name)
+		if err != nil {
+			return err
+		}
+		_, err = f.Write([]byte(content))
+		return err
+	}
+
+	if err := writeEntry("[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>`); err != nil {
 		return nil, err
 	}
-	return b.Bytes(), nil
+	if err := writeEntry("_rels/.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>`); err != nil {
+		return nil, err
+	}
+	if err := writeEntry("xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Report" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>`); err != nil {
+		return nil, err
+	}
+	if err := writeEntry("xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>`); err != nil {
+		return nil, err
+	}
+	if err := writeEntry("xl/worksheets/sheet1.xml", buildSheetXML(rows)); err != nil {
+		return nil, err
+	}
+	if err := archive.Close(); err != nil {
+		return nil, err
+	}
+	return workbook.Bytes(), nil
+}
+
+func buildSheetXML(rows [][]string) string {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`)
+	b.WriteString("\n")
+	b.WriteString(`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">`)
+	b.WriteString("\n  <sheetData>\n")
+	for rowIndex, row := range rows {
+		b.WriteString(fmt.Sprintf("    <row r=\"%d\">", rowIndex+1))
+		for _, cell := range row {
+			b.WriteString(`<c t="inlineStr"><is><t xml:space="preserve">`)
+			b.WriteString(escapeXML(cell))
+			b.WriteString(`</t></is></c>`)
+		}
+		b.WriteString("</row>\n")
+	}
+	b.WriteString("  </sheetData>\n")
+	b.WriteString("</worksheet>")
+	return b.String()
+}
+
+func escapeXML(in string) string {
+	var b bytes.Buffer
+	_ = xml.EscapeText(&b, []byte(in))
+	return b.String()
 }
 
 func escapePipe(in string) string {

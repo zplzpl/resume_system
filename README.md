@@ -46,12 +46,12 @@ Request example:
 
 ### Export report
 
-`GET /api/reports/{reportID}/export?format=json|markdown|csv`
+`GET /api/reports/{reportID}/export?format=json|markdown|xlsx`
 
 Supported formats:
 - `json`
 - `markdown` (or `md`)
-- `csv`
+- `xlsx`
 
 ## Test
 
